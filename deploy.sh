@@ -89,13 +89,20 @@ check_firewall() {
     # Check firewall status on different systems
     if command -v ufw &> /dev/null; then
         # Ubuntu/Debian with UFW
-        if ufw status | grep -q "Status: active"; then
+        if ufw status 2>/dev/null | grep -q "Status: active"; then
             echo -e "${YELLOW}Firewall (UFW) is active.${NC}"
             if ! ufw status | grep -q "$port/tcp"; then
                 echo -e "${YELLOW}Port $port is not explicitly allowed in the firewall.${NC}"
                 if get_yes_no_input "Would you like to allow port $port through the firewall? (y/n): "; then
-                    sudo ufw allow $port/tcp
-                    echo -e "${GREEN}Port $port has been allowed through the firewall.${NC}"
+                    if command -v sudo &> /dev/null; then
+                        if sudo ufw allow $port/tcp; then
+                            echo -e "${GREEN}Port $port has been allowed through the firewall.${NC}"
+                        else
+                            echo -e "${RED}Failed to configure firewall. Please check permissions.${NC}"
+                        fi
+                    else
+                        echo -e "${RED}Sudo not available. Cannot configure firewall.${NC}"
+                    fi
                 else
                     echo -e "${YELLOW}Port $port remains closed. This may affect access to CIAO-CORS.${NC}"
                 fi
@@ -107,14 +114,20 @@ check_firewall() {
         fi
     elif command -v firewall-cmd &> /dev/null; then
         # CentOS/RHEL/Fedora with firewalld
-        if systemctl is-active --quiet firewalld; then
+        if systemctl is-active --quiet firewalld 2>/dev/null; then
             echo -e "${YELLOW}Firewall (firewalld) is active.${NC}"
-            if ! firewall-cmd --list-ports | grep -q "$port/tcp"; then
+            if ! firewall-cmd --list-ports 2>/dev/null | grep -q "$port/tcp"; then
                 echo -e "${YELLOW}Port $port is not explicitly allowed in the firewall.${NC}"
                 if get_yes_no_input "Would you like to allow port $port through the firewall? (y/n): "; then
-                    sudo firewall-cmd --add-port=$port/tcp --permanent
-                    sudo firewall-cmd --reload
-                    echo -e "${GREEN}Port $port has been allowed through the firewall.${NC}"
+                    if command -v sudo &> /dev/null; then
+                        if sudo firewall-cmd --add-port=$port/tcp --permanent && sudo firewall-cmd --reload; then
+                            echo -e "${GREEN}Port $port has been allowed through the firewall.${NC}"
+                        else
+                            echo -e "${RED}Failed to configure firewall. Please check permissions.${NC}"
+                        fi
+                    else
+                        echo -e "${RED}Sudo not available. Cannot configure firewall.${NC}"
+                    fi
                 else
                     echo -e "${YELLOW}Port $port remains closed. This may affect access to CIAO-CORS.${NC}"
                 fi
@@ -126,14 +139,21 @@ check_firewall() {
         fi
     elif command -v iptables &> /dev/null; then
         # Generic Linux with iptables
-        if iptables -L INPUT | grep -q "Chain INPUT (policy DROP)"; then
+        if iptables -L INPUT 2>/dev/null | grep -q "Chain INPUT (policy DROP)"; then
             echo -e "${YELLOW}Firewall (iptables) appears to be active with default DROP policy.${NC}"
-            if ! iptables -L INPUT -n | grep -q "tcp dpt:$port"; then
+            if ! iptables -L INPUT -n 2>/dev/null | grep -q "tcp dpt:$port"; then
                 echo -e "${YELLOW}Port $port is not explicitly allowed in the firewall.${NC}"
                 if get_yes_no_input "Would you like to allow port $port through the firewall? (y/n): "; then
-                    sudo iptables -A INPUT -p tcp --dport $port -j ACCEPT
-                    echo -e "${GREEN}Port $port has been temporarily allowed. Note: This change may not persist after reboot.${NC}"
-                    echo -e "${YELLOW}To make this change permanent, you may need to save your iptables rules.${NC}"
+                    if command -v sudo &> /dev/null; then
+                        if sudo iptables -A INPUT -p tcp --dport $port -j ACCEPT; then
+                            echo -e "${GREEN}Port $port has been temporarily allowed. Note: This change may not persist after reboot.${NC}"
+                            echo -e "${YELLOW}To make this change permanent, you may need to save your iptables rules.${NC}"
+                        else
+                            echo -e "${RED}Failed to configure firewall. Please check permissions.${NC}"
+                        fi
+                    else
+                        echo -e "${RED}Sudo not available. Cannot configure firewall.${NC}"
+                    fi
                 else
                     echo -e "${YELLOW}Port $port remains closed. This may affect access to CIAO-CORS.${NC}"
                 fi
@@ -268,8 +288,16 @@ check_deno() {
 # Function to load existing configuration
 load_config() {
     if [ -f "$CONFIG_FILE" ]; then
-        source "$CONFIG_FILE"
-        echo -e "${GREEN}Loaded existing configuration.${NC}"
+        # Check if config file is readable
+        if [ -r "$CONFIG_FILE" ]; then
+            source "$CONFIG_FILE"
+            echo -e "${GREEN}Loaded existing configuration.${NC}"
+        else
+            echo -e "${RED}Configuration file exists but is not readable. Using defaults.${NC}"
+            PORT=$DEFAULT_PORT
+            SERVICE_NAME=$DEFAULT_SERVICE_NAME
+            ADMIN_PASSWORD=$DEFAULT_ADMIN_PASSWORD
+        fi
     else
         PORT=$DEFAULT_PORT
         SERVICE_NAME=$DEFAULT_SERVICE_NAME
@@ -280,13 +308,26 @@ load_config() {
 
 # Function to save configuration
 save_config() {
+    # Check if we can write to the config directory
+    local config_dir=$(dirname "$CONFIG_FILE")
+    if [ ! -w "$config_dir" ]; then
+        echo -e "${RED}Cannot write to configuration directory: $config_dir${NC}"
+        echo -e "${YELLOW}Configuration will not be saved.${NC}"
+        return 1
+    fi
+    
     # Backup existing config
     backup_config
     
-    echo "PORT=$PORT" > "$CONFIG_FILE"
-    echo "SERVICE_NAME=$SERVICE_NAME" >> "$CONFIG_FILE"
-    echo "ADMIN_PASSWORD=$ADMIN_PASSWORD" >> "$CONFIG_FILE"
-    echo -e "${GREEN}Configuration saved to $CONFIG_FILE${NC}"
+    # Try to write configuration
+    if echo "PORT=$PORT" > "$CONFIG_FILE" 2>/dev/null &&
+       echo "SERVICE_NAME=$SERVICE_NAME" >> "$CONFIG_FILE" 2>/dev/null &&
+       echo "ADMIN_PASSWORD=$ADMIN_PASSWORD" >> "$CONFIG_FILE" 2>/dev/null; then
+        echo -e "${GREEN}Configuration saved to $CONFIG_FILE${NC}"
+    else
+        echo -e "${RED}Failed to save configuration file.${NC}"
+        return 1
+    fi
     
     # Check if service is running and ask about restart for configuration changes
     if check_service; then
@@ -445,7 +486,8 @@ configure_service() {
 
 # Function to check if service is already running
 check_service() {
-    if pgrep -f "deno run.*$SERVICE_NAME" > /dev/null; then
+    # Check for both the main file and service name patterns
+    if pgrep -f "deno run.*$MAIN_FILE" > /dev/null || pgrep -f "deno run.*ciao-cors" > /dev/null; then
         return 0 # Service is running
     else
         return 1 # Service is not running
@@ -627,16 +669,24 @@ nohup deno run --allow-net --allow-env --allow-read $MAIN_FILE > ciao-cors.log 2
 echo \$! > ciao-cors.pid
 echo \"CIAO-CORS started with PID: \$(cat ciao-cors.pid)\"" > "$repo_dir/start-ciao-cors.sh"
             
+            # Fix: Use MAIN_FILE instead of SERVICE_NAME in stop script
             echo "#!/bin/bash
 cd \"$repo_dir\"
 if [ -f ciao-cors.pid ]; then
-    kill \$(cat ciao-cors.pid) 2>/dev/null
+    local pid=\$(cat ciao-cors.pid)
+    if kill \$pid 2>/dev/null; then
+        echo \"CIAO-CORS stopped (PID: \$pid)\"
+    else
+        echo \"Failed to stop process with PID: \$pid\"
+    fi
     rm ciao-cors.pid
-    echo \"CIAO-CORS stopped\"
 else
     echo \"PID file not found, trying to find and kill the process...\"
-    pkill -f \"deno run.*$SERVICE_NAME\"
-    echo \"Sent kill signal to CIAO-CORS processes\"
+    if pkill -f \"deno run.*$MAIN_FILE\"; then
+        echo \"CIAO-CORS processes stopped\"
+    else
+        echo \"No CIAO-CORS processes found\"
+    fi
 fi" > "$repo_dir/stop-ciao-cors.sh"
             
             chmod +x "$repo_dir/start-ciao-cors.sh" "$repo_dir/stop-ciao-cors.sh"
@@ -677,19 +727,32 @@ stop_service() {
     # Stop the service
     if [[ "$OSTYPE" == "linux-gnu"* ]] && systemctl list-unit-files | grep -q "$SERVICE_NAME.service"; then
         echo -e "${CYAN}Stopping systemd service...${NC}"
-        sudo systemctl stop $SERVICE_NAME
-        echo -e "${GREEN}CIAO-CORS service stopped.${NC}"
+        if sudo systemctl stop $SERVICE_NAME; then
+            echo -e "${GREEN}CIAO-CORS service stopped successfully.${NC}"
+        else
+            echo -e "${RED}Failed to stop systemd service.${NC}"
+        fi
     else
         echo -e "${CYAN}Stopping background process...${NC}"
         local repo_dir="$HOME/ciao-cors"
+        local stopped=false
+        
         if [ -f "$repo_dir/ciao-cors.pid" ]; then
-            kill $(cat "$repo_dir/ciao-cors.pid")
-            rm "$repo_dir/ciao-cors.pid"
-            echo -e "${GREEN}CIAO-CORS process stopped.${NC}"
-        else
-            echo -e "${YELLOW}PID file not found. Trying to find and kill the process...${NC}"
-            pkill -f "deno run.*$SERVICE_NAME"
-            echo -e "${GREEN}Sent kill signal to all CIAO-CORS processes.${NC}"
+            local pid=$(cat "$repo_dir/ciao-cors.pid")
+            if kill $pid 2>/dev/null; then
+                echo -e "${GREEN}CIAO-CORS process stopped (PID: $pid).${NC}"
+                stopped=true
+            fi
+            rm "$repo_dir/ciao-cors.pid" 2>/dev/null
+        fi
+        
+        if ! $stopped; then
+            echo -e "${YELLOW}PID file not found or invalid. Trying to find and kill the process...${NC}"
+            if pkill -f "deno run.*$MAIN_FILE" 2>/dev/null; then
+                echo -e "${GREEN}CIAO-CORS processes stopped.${NC}"
+            else
+                echo -e "${YELLOW}No CIAO-CORS processes found to stop.${NC}"
+            fi
         fi
     fi
     
@@ -710,24 +773,108 @@ restart_service() {
     # Check if service is running
     if ! check_service; then
         echo -e "${YELLOW}CIAO-CORS is not running. Starting it...${NC}"
-        deploy_service
+        # Call a simplified start instead of full deploy
+        start_existing_service
         return
     fi
     
     # Restart the service
     if [[ "$OSTYPE" == "linux-gnu"* ]] && systemctl list-unit-files | grep -q "$SERVICE_NAME.service"; then
         echo -e "${CYAN}Restarting systemd service...${NC}"
-        sudo systemctl restart $SERVICE_NAME
-        echo -e "${GREEN}CIAO-CORS service restarted.${NC}"
+        if sudo systemctl restart $SERVICE_NAME; then
+            echo -e "${GREEN}CIAO-CORS service restarted successfully.${NC}"
+            
+            # Verify service is running
+            sleep 2
+            if systemctl is-active --quiet $SERVICE_NAME; then
+                echo -e "${GREEN}Service is running properly.${NC}"
+            else
+                echo -e "${RED}Service failed to start properly. Check logs for details.${NC}"
+            fi
+        else
+            echo -e "${RED}Failed to restart systemd service.${NC}"
+        fi
     else
         echo -e "${CYAN}Restarting background process...${NC}"
-        stop_service
-        deploy_service
+        local repo_dir="$HOME/ciao-cors"
+        
+        # Stop the current process
+        if [ -f "$repo_dir/ciao-cors.pid" ]; then
+            local old_pid=$(cat "$repo_dir/ciao-cors.pid")
+            if kill $old_pid 2>/dev/null; then
+                echo -e "${GREEN}Stopped old process (PID: $old_pid).${NC}"
+            fi
+            rm "$repo_dir/ciao-cors.pid" 2>/dev/null
+        else
+            echo -e "${YELLOW}PID file not found. Trying to kill existing processes...${NC}"
+            pkill -f "deno run.*$MAIN_FILE" 2>/dev/null
+        fi
+        
+        # Wait a moment for cleanup
+        sleep 2
+        
+        # Start new process
+        cd "$repo_dir"
+        export PORT=$PORT
+        export ADMIN_PASSWORD=$ADMIN_PASSWORD
+        
+        nohup deno run --allow-net --allow-env --allow-read $MAIN_FILE > ciao-cors.log 2>&1 &
+        local new_pid=$!
+        echo $new_pid > ciao-cors.pid
+        
+        # Verify the new process is running
+        sleep 2
+        if ps -p $new_pid > /dev/null; then
+            echo -e "${GREEN}CIAO-CORS restarted successfully with PID: $new_pid${NC}"
+        else
+            echo -e "${RED}Failed to restart CIAO-CORS. Check the log file for errors.${NC}"
+        fi
     fi
     
     echo ""
     echo -e "${YELLOW}Press any key to return to the main menu...${NC}"
     read -n 1
+}
+
+# Function to start existing service (simplified version of deploy)
+start_existing_service() {
+    local repo_dir="$HOME/ciao-cors"
+    
+    if [ ! -d "$repo_dir" ]; then
+        echo -e "${RED}CIAO-CORS repository not found. Please run 'Deploy CIAO-CORS' first.${NC}"
+        echo -e "${YELLOW}Press any key to return to the main menu...${NC}"
+        read -n 1
+        return
+    fi
+    
+    echo -e "${CYAN}Starting CIAO-CORS...${NC}"
+    cd "$repo_dir"
+    
+    # Try systemd first if available
+    if [[ "$OSTYPE" == "linux-gnu"* ]] && systemctl list-unit-files | grep -q "$SERVICE_NAME.service"; then
+        echo -e "${CYAN}Starting systemd service...${NC}"
+        if sudo systemctl start $SERVICE_NAME; then
+            echo -e "${GREEN}CIAO-CORS service started successfully.${NC}"
+        else
+            echo -e "${RED}Failed to start systemd service.${NC}"
+        fi
+    else
+        # Start as background process
+        echo -e "${CYAN}Starting as background process...${NC}"
+        export PORT=$PORT
+        export ADMIN_PASSWORD=$ADMIN_PASSWORD
+        
+        nohup deno run --allow-net --allow-env --allow-read $MAIN_FILE > ciao-cors.log 2>&1 &
+        local pid=$!
+        echo $pid > ciao-cors.pid
+        
+        sleep 2
+        if ps -p $pid > /dev/null; then
+            echo -e "${GREEN}CIAO-CORS started with PID: $pid${NC}"
+        else
+            echo -e "${RED}Failed to start CIAO-CORS. Check the log file for errors.${NC}"
+        fi
+    fi
 }
 
 # Function to uninstall the service
@@ -802,10 +949,15 @@ view_status() {
             systemctl status $SERVICE_NAME --no-pager
         else
             echo -e "${CYAN}Service type: background process${NC}"
-            local pid=$(pgrep -f "deno run.*$SERVICE_NAME")
-            echo -e "${CYAN}PID: $pid${NC}"
-            echo -e "${CYAN}Process info:${NC}"
-            ps -p $pid -o pid,ppid,cmd,%cpu,%mem,etime
+            # Fix: Use MAIN_FILE instead of SERVICE_NAME for process detection
+            local pid=$(pgrep -f "deno run.*$MAIN_FILE" | head -1)
+            if [ -n "$pid" ]; then
+                echo -e "${CYAN}PID: $pid${NC}"
+                echo -e "${CYAN}Process info:${NC}"
+                ps -p $pid -o pid,ppid,cmd,%cpu,%mem,etime 2>/dev/null || echo -e "${YELLOW}Process details unavailable${NC}"
+            else
+                echo -e "${YELLOW}Process PID not found${NC}"
+            fi
         fi
         
         # Try to get the URL
@@ -815,7 +967,11 @@ view_status() {
         # Check if curl is installed to test the endpoint
         if command -v curl &> /dev/null; then
             echo -e "${CYAN}Testing endpoint...${NC}"
-            curl -s -o /dev/null -w "HTTP status code: %{http_code}\n" http://localhost:$PORT/ || echo -e "${RED}Failed to connect to the service.${NC}"
+            if curl -s -o /dev/null -w "HTTP status code: %{http_code}\n" --connect-timeout 5 http://localhost:$PORT/ 2>/dev/null; then
+                echo -e "${GREEN}Service is responding properly.${NC}"
+            else
+                echo -e "${RED}Failed to connect to the service.${NC}"
+            fi
         fi
     else
         echo -e "${RED}Status: Not running${NC}"
@@ -839,13 +995,27 @@ view_logs() {
     local log_file="$repo_dir/ciao-cors.log"
     
     # Check if service is running through systemd
-    if [[ "$OSTYPE" == "linux-gnu"* ]] && systemctl list-unit_files | grep -q "$SERVICE_NAME.service"; then
+    if [[ "$OSTYPE" == "linux-gnu"* ]] && systemctl list-unit-files | grep -q "$SERVICE_NAME.service"; then
         echo -e "${CYAN}Viewing systemd journal logs for $SERVICE_NAME:${NC}"
-        sudo journalctl -u $SERVICE_NAME -n 100 --no-pager
+        if command -v sudo &> /dev/null; then
+            sudo journalctl -u $SERVICE_NAME -n 100 --no-pager
+        else
+            echo -e "${RED}Sudo not available. Cannot view systemd logs.${NC}"
+        fi
     elif [ -f "$log_file" ]; then
+        # Check log file size and warn if too large
+        local log_size=$(du -m "$log_file" 2>/dev/null | cut -f1)
+        if [ -n "$log_size" ] && [ "$log_size" -gt 100 ]; then
+            echo -e "${YELLOW}Warning: Log file is large (${log_size}MB). Consider rotating logs.${NC}"
+        fi
+        
         # View the log file
         echo -e "${CYAN}Viewing log file: $log_file${NC}"
-        tail -n 100 "$log_file"
+        if [ -r "$log_file" ]; then
+            tail -n 100 "$log_file"
+        else
+            echo -e "${RED}Cannot read log file. Permission denied.${NC}"
+        fi
     else
         echo -e "${RED}No log file found at $log_file${NC}"
         echo -e "${YELLOW}The service may not be running or logs are directed elsewhere.${NC}"
@@ -981,18 +1151,20 @@ check_privileges() {
 check_privileges
 load_config
 
-# Check for updates
+# Check for updates with error handling
 if [ -d "$HOME/ciao-cors" ] && command -v git &> /dev/null; then
     cd "$HOME/ciao-cors"
-    git fetch -q
-    LOCAL=$(git rev-parse HEAD)
-    REMOTE=$(git rev-parse @{u})
-    
-    if [ "$LOCAL" != "$REMOTE" ]; then
-        echo -e "${YELLOW}Update available for CIAO-CORS!${NC}"
-        echo -e "${BLUE}Run the 'Update Service' option to get the latest features.${NC}"
-        sleep 2
+    if git fetch -q 2>/dev/null; then
+        LOCAL=$(git rev-parse HEAD 2>/dev/null)
+        REMOTE=$(git rev-parse @{u} 2>/dev/null)
+        
+        if [ -n "$LOCAL" ] && [ -n "$REMOTE" ] && [ "$LOCAL" != "$REMOTE" ]; then
+            echo -e "${YELLOW}Update available for CIAO-CORS!${NC}"
+            echo -e "${BLUE}Run the 'Update Service' option to get the latest features.${NC}"
+            sleep 2
+        fi
     fi
+    # If git fetch fails, silently continue without update check
 fi
 
 main_menu
