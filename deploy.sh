@@ -34,15 +34,15 @@ SCRIPT_UPDATE_DATE=$(date -r "$SCRIPT_PATH" "+%Y-%m-%d %H:%M:%S" 2>/dev/null || 
 show_banner() {
     clear
     echo -e "${BLUE}"
-    echo '  ______ _____          ____        ______  ____  _____   _____ '
-    echo ' / _____|_   _|   /\   / __ \      / _____|/ __ \|  __ \ / ____|'
-    echo '| |       | |    /  \ | |  | |    | |     | |  | | |__) | (___  '
-    echo '| |       | |   / /\ \| |  | |    | |     | |  | |  _  / \___ \ '
-    echo '| |____  _| |_ / ____ \ |__| |    | |____ | |__| | | \ \ ____) |'
-    echo ' \_____|_____/_/    \_\____/      \______|\____/|_|  \_\_____/ '
+    echo '  ██████╗██╗ █████╗  ██████╗       ██████╗ ██████╗ ██████╗ ███████╗'
+    echo ' ██╔════╝██║██╔══██╗██╔═══██╗     ██╔════╝██╔═══██╗██╔══██╗██╔════╝'
+    echo ' ██║     ██║███████║██║   ██║     ██║     ██║   ██║██████╔╝███████╗'
+    echo ' ██║     ██║██╔══██║██║   ██║     ██║     ██║   ██║██╔══██╗╚════██║'
+    echo ' ╚██████╗██║██║  ██║╚██████╔╝     ╚██████╗╚██████╔╝██║  ██║███████║'
+    echo '  ╚═════╝╚═╝╚═╝  ╚═╝ ╚═════╝       ╚═════╝ ╚═════╝ ╚═╝  ╚═╝╚══════╝'
     echo -e "${NC}"
     echo -e "${CYAN}Comprehensive CORS Proxy with Web Management Interface${NC}"
-    echo -e "${PURPLE}=================================================${NC}"
+    echo -e "${PURPLE}═══════════════════════════════════════════════════════════════════${NC}"
     echo -e "${YELLOW}Script Version: ${SCRIPT_VERSION} | Last Updated: ${SCRIPT_UPDATE_DATE}${NC}"
     echo ""
 }
@@ -288,13 +288,16 @@ save_config() {
     echo "ADMIN_PASSWORD=$ADMIN_PASSWORD" >> "$CONFIG_FILE"
     echo -e "${GREEN}Configuration saved to $CONFIG_FILE${NC}"
     
-    # If service is running, ask to restart to apply changes
+    # Check if service is running and ask about restart for configuration changes
     if check_service; then
-        echo -e "${YELLOW}The service is currently running with the old configuration.${NC}"
-        if get_yes_no_input "Would you like to restart the service to apply the new configuration? (y/n): "; then
+        echo -e "${YELLOW}The service is currently running.${NC}"
+        echo -e "${CYAN}Configuration changes (especially port and service name) require a restart to take effect.${NC}"
+        echo -e "${BLUE}Password changes will be applied automatically on the next request.${NC}"
+        
+        if get_yes_no_input "Would you like to restart the service now to apply all changes? (y/n): "; then
             restart_service
         else
-            echo -e "${YELLOW}Configuration changes will take effect after the next restart.${NC}"
+            echo -e "${YELLOW}Configuration saved. Some changes will take effect after the next restart.${NC}"
         fi
     fi
     
@@ -836,7 +839,7 @@ view_logs() {
     local log_file="$repo_dir/ciao-cors.log"
     
     # Check if service is running through systemd
-    if [[ "$OSTYPE" == "linux-gnu"* ]] && systemctl list-unit-files | grep -q "$SERVICE_NAME.service"; then
+    if [[ "$OSTYPE" == "linux-gnu"* ]] && systemctl list-unit_files | grep -q "$SERVICE_NAME.service"; then
         echo -e "${CYAN}Viewing systemd journal logs for $SERVICE_NAME:${NC}"
         sudo journalctl -u $SERVICE_NAME -n 100 --no-pager
     elif [ -f "$log_file" ]; then
