@@ -25,6 +25,8 @@ DEFAULT_ADMIN_PASSWORD="admin123"
 CONFIG_FILE="$HOME/.ciao-cors-config"
 REPO_URL="https://github.com/bestZwei/ciao-cors"
 MAIN_FILE="main.ts"
+SCRIPT_PATH=$(realpath "$0")
+ALIAS_NAME="ciaocors"
 
 # Function to display the beautiful banner
 show_banner() {
@@ -42,30 +44,219 @@ show_banner() {
     echo ""
 }
 
+# Function to get valid yes/no input
+get_yes_no_input() {
+    local prompt="$1"
+    local response=""
+    
+    while true; do
+        read -p "$prompt" response
+        case "$response" in
+            [Yy]* ) return 0 ;;
+            [Nn]* ) return 1 ;;
+            * ) echo -e "${YELLOW}Please answer yes (y) or no (n).${NC}" ;;
+        esac
+    done
+}
+
+# Function to check if port is available
+check_port_available() {
+    local port=$1
+    if command -v netstat &> /dev/null; then
+        if netstat -tuln | grep -q ":$port "; then
+            return 1
+        fi
+    elif command -v lsof &> /dev/null; then
+        if lsof -i ":$port" &> /dev/null; then
+            return 1
+        fi
+    elif command -v ss &> /dev/null; then
+        if ss -tuln | grep -q ":$port "; then
+            return 1
+        fi
+    fi
+    return 0
+}
+
+# Function to check firewall status and port
+check_firewall() {
+    local port=$1
+    echo -e "${CYAN}Checking firewall status...${NC}"
+    
+    # Check firewall status on different systems
+    if command -v ufw &> /dev/null; then
+        # Ubuntu/Debian with UFW
+        if ufw status | grep -q "Status: active"; then
+            echo -e "${YELLOW}Firewall (UFW) is active.${NC}"
+            if ! ufw status | grep -q "$port/tcp"; then
+                echo -e "${YELLOW}Port $port is not explicitly allowed in the firewall.${NC}"
+                if get_yes_no_input "Would you like to allow port $port through the firewall? (y/n): "; then
+                    sudo ufw allow $port/tcp
+                    echo -e "${GREEN}Port $port has been allowed through the firewall.${NC}"
+                else
+                    echo -e "${YELLOW}Port $port remains closed. This may affect access to CIAO-CORS.${NC}"
+                fi
+            else
+                echo -e "${GREEN}Port $port is already allowed in the firewall.${NC}"
+            fi
+        else
+            echo -e "${GREEN}Firewall (UFW) is not active. No port configuration needed.${NC}"
+        fi
+    elif command -v firewall-cmd &> /dev/null; then
+        # CentOS/RHEL/Fedora with firewalld
+        if systemctl is-active --quiet firewalld; then
+            echo -e "${YELLOW}Firewall (firewalld) is active.${NC}"
+            if ! firewall-cmd --list-ports | grep -q "$port/tcp"; then
+                echo -e "${YELLOW}Port $port is not explicitly allowed in the firewall.${NC}"
+                if get_yes_no_input "Would you like to allow port $port through the firewall? (y/n): "; then
+                    sudo firewall-cmd --add-port=$port/tcp --permanent
+                    sudo firewall-cmd --reload
+                    echo -e "${GREEN}Port $port has been allowed through the firewall.${NC}"
+                else
+                    echo -e "${YELLOW}Port $port remains closed. This may affect access to CIAO-CORS.${NC}"
+                fi
+            else
+                echo -e "${GREEN}Port $port is already allowed in the firewall.${NC}"
+            fi
+        else
+            echo -e "${GREEN}Firewall (firewalld) is not active. No port configuration needed.${NC}"
+        fi
+    elif command -v iptables &> /dev/null; then
+        # Generic Linux with iptables
+        if iptables -L INPUT | grep -q "Chain INPUT (policy DROP)"; then
+            echo -e "${YELLOW}Firewall (iptables) appears to be active with default DROP policy.${NC}"
+            if ! iptables -L INPUT -n | grep -q "tcp dpt:$port"; then
+                echo -e "${YELLOW}Port $port is not explicitly allowed in the firewall.${NC}"
+                if get_yes_no_input "Would you like to allow port $port through the firewall? (y/n): "; then
+                    sudo iptables -A INPUT -p tcp --dport $port -j ACCEPT
+                    echo -e "${GREEN}Port $port has been temporarily allowed. Note: This change may not persist after reboot.${NC}"
+                    echo -e "${YELLOW}To make this change permanent, you may need to save your iptables rules.${NC}"
+                else
+                    echo -e "${YELLOW}Port $port remains closed. This may affect access to CIAO-CORS.${NC}"
+                fi
+            else
+                echo -e "${GREEN}Port $port appears to be already allowed in the firewall.${NC}"
+            fi
+        else
+            echo -e "${GREEN}Firewall (iptables) doesn't appear to be blocking connections. No port configuration needed.${NC}"
+        fi
+    elif [[ "$OSTYPE" == "darwin"* ]]; then
+        # macOS
+        echo -e "${BLUE}macOS detected. The built-in firewall is typically configured through System Preferences.${NC}"
+        echo -e "${YELLOW}Please ensure that your macOS firewall allows incoming connections to port $port if needed.${NC}"
+    else
+        echo -e "${BLUE}Could not determine firewall status. Please manually verify firewall settings if needed.${NC}"
+    fi
+}
+
+# Function to check system resources
+check_system_resources() {
+    echo -e "${CYAN}Checking system resources...${NC}"
+    
+    # Check disk space
+    local free_space=$(df -h . | awk 'NR==2 {print $4}')
+    echo -e "${BLUE}Available disk space: $free_space${NC}"
+    
+    # Check memory
+    if command -v free &> /dev/null; then
+        local free_memory=$(free -h | awk '/^Mem:/ {print $7}')
+        echo -e "${BLUE}Available memory: $free_memory${NC}"
+    elif [[ "$OSTYPE" == "darwin"* ]]; then
+        local free_memory=$(vm_stat | perl -ne '/page size of (\d+)/ and $size=$1; /Pages free: (\d+)/ and printf("%.2f GB\n", $1 * $size / 1048576 / 1024)')
+        echo -e "${BLUE}Available memory (approx.): $free_memory${NC}"
+    fi
+    
+    # Check CPU
+    local cpu_cores=$(grep -c processor /proc/cpuinfo 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo "Unknown")
+    echo -e "${BLUE}CPU cores: $cpu_cores${NC}"
+    
+    # Check for minimum requirements
+    if df -k . | awk 'NR==2 {exit ($4 < 100000)}'; then
+        echo -e "${RED}Warning: Less than 100MB of free disk space available. This may cause issues.${NC}"
+    fi
+    
+    echo -e "${GREEN}System resource check completed.${NC}"
+}
+
+# Function to create command shortcut
+create_command_shortcut() {
+    local shell_rc=""
+    local shortcut_exists=false
+    
+    # Determine which shell config file to use
+    if [[ -n "$ZSH_VERSION" ]]; then
+        shell_rc="$HOME/.zshrc"
+    elif [[ -n "$BASH_VERSION" ]]; then
+        if [[ "$OSTYPE" == "darwin"* ]]; then
+            shell_rc="$HOME/.bash_profile"
+            [[ ! -f "$shell_rc" ]] && shell_rc="$HOME/.profile"
+        else
+            shell_rc="$HOME/.bashrc"
+        fi
+    else
+        shell_rc="$HOME/.profile"
+    fi
+    
+    # Check if the alias already exists
+    if grep -q "alias $ALIAS_NAME=" "$shell_rc" 2>/dev/null; then
+        shortcut_exists=true
+    fi
+    
+    # Ask to create the shortcut if it doesn't exist
+    if ! $shortcut_exists; then
+        echo -e "${CYAN}Would you like to create a command shortcut so you can run this script by typing '${ALIAS_NAME}'?${NC}"
+        if get_yes_no_input "Create command shortcut? (y/n): "; then
+            echo "alias $ALIAS_NAME='$SCRIPT_PATH'" >> "$shell_rc"
+            echo -e "${GREEN}Command shortcut created! You can now run this script by typing '${ALIAS_NAME}'.${NC}"
+            echo -e "${YELLOW}Note: You need to restart your terminal or run 'source $shell_rc' for the shortcut to take effect.${NC}"
+        else
+            echo -e "${BLUE}No command shortcut created. You can still run this script using its full path.${NC}"
+        fi
+    else
+        echo -e "${GREEN}Command shortcut '${ALIAS_NAME}' already exists in $shell_rc.${NC}"
+    fi
+}
+
+# Function to backup configuration
+backup_config() {
+    if [ -f "$CONFIG_FILE" ]; then
+        local backup_file="${CONFIG_FILE}.backup.$(date +%Y%m%d%H%M%S)"
+        cp "$CONFIG_FILE" "$backup_file"
+        echo -e "${GREEN}Configuration backed up to: $backup_file${NC}"
+    fi
+}
+
 # Function to check if Deno is installed
 check_deno() {
     if ! command -v deno &> /dev/null; then
         echo -e "${YELLOW}Deno is not installed on your system.${NC}"
-        read -p "Would you like to install Deno now? (y/n): " install_deno
-        if [[ $install_deno =~ ^[Yy]$ ]]; then
-            echo -e "${CYAN}Installing Deno...${NC}"
-            if [[ "$OSTYPE" == "darwin"* ]] || [[ "$OSTYPE" == "linux-gnu"* ]]; then
-                curl -fsSL https://deno.land/x/install/install.sh | sh
-                echo -e "${GREEN}Please restart your terminal or run 'source ~/.bashrc' (or equivalent) to use Deno.${NC}"
-                echo -e "${YELLOW}After restarting your terminal, please run this script again.${NC}"
-                exit 0
-            elif [[ "$OSTYPE" == "msys"* ]] || [[ "$OSTYPE" == "win32" ]]; then
-                echo -e "${CYAN}Please visit https://deno.land/#installation to install Deno on Windows.${NC}"
-                echo -e "${YELLOW}After installing Deno, please run this script again.${NC}"
-                exit 0
+        
+        while true; do
+            if get_yes_no_input "Would you like to install Deno now? (y/n): "; then
+                echo -e "${CYAN}Installing Deno...${NC}"
+                if [[ "$OSTYPE" == "darwin"* ]] || [[ "$OSTYPE" == "linux-gnu"* ]]; then
+                    curl -fsSL https://deno.land/x/install/install.sh | sh
+                    echo -e "${GREEN}Please restart your terminal or run 'source ~/.bashrc' (or equivalent) to use Deno.${NC}"
+                    echo -e "${YELLOW}After restarting your terminal, please run this script again.${NC}"
+                    exit 0
+                elif [[ "$OSTYPE" == "msys"* ]] || [[ "$OSTYPE" == "win32" ]]; then
+                    echo -e "${CYAN}Please visit https://deno.land/#installation to install Deno on Windows.${NC}"
+                    echo -e "${YELLOW}After installing Deno, please run this script again.${NC}"
+                    exit 0
+                else
+                    echo -e "${RED}Unsupported operating system. Please install Deno manually: https://deno.land/#installation${NC}"
+                    exit 1
+                fi
+                break
             else
-                echo -e "${RED}Unsupported operating system. Please install Deno manually: https://deno.land/#installation${NC}"
-                exit 1
+                echo -e "${RED}Deno is required to run CIAO-CORS.${NC}"
+                if get_yes_no_input "Are you sure you want to exit without installing Deno? (y/n): "; then
+                    echo -e "${YELLOW}Installation cancelled. Exiting.${NC}"
+                    exit 1
+                fi
+                # If they don't confirm exit, loop back to the original question
             fi
-        else
-            echo -e "${RED}Deno is required to run CIAO-CORS. Exiting.${NC}"
-            exit 1
-        fi
+        done
     else
         echo -e "${GREEN}✓ Deno is already installed.${NC}"
     fi
@@ -86,6 +277,9 @@ load_config() {
 
 # Function to save configuration
 save_config() {
+    # Backup existing config
+    backup_config
+    
     echo "PORT=$PORT" > "$CONFIG_FILE"
     echo "SERVICE_NAME=$SERVICE_NAME" >> "$CONFIG_FILE"
     echo "ADMIN_PASSWORD=$ADMIN_PASSWORD" >> "$CONFIG_FILE"
@@ -102,16 +296,69 @@ configure_service() {
     load_config
     
     # Ask for port
-    read -p "Enter port number [$PORT]: " new_port
-    PORT=${new_port:-$PORT}
+    while true; do
+        read -p "Enter port number [$PORT]: " new_port
+        new_port=${new_port:-$PORT}
+        
+        # Validate port number
+        if ! [[ "$new_port" =~ ^[0-9]+$ ]] || [ "$new_port" -lt 1 ] || [ "$new_port" -gt 65535 ]; then
+            echo -e "${RED}Invalid port number. Please enter a number between 1 and 65535.${NC}"
+            continue
+        fi
+        
+        # Check if port is available
+        if ! check_port_available "$new_port"; then
+            echo -e "${YELLOW}Port $new_port is already in use.${NC}"
+            if get_yes_no_input "Would you like to choose a different port? (y/n): "; then
+                continue
+            fi
+        fi
+        
+        PORT=$new_port
+        break
+    done
     
     # Ask for service name
-    read -p "Enter service name [$SERVICE_NAME]: " new_name
-    SERVICE_NAME=${new_name:-$SERVICE_NAME}
+    while true; do
+        read -p "Enter service name [$SERVICE_NAME]: " new_name
+        new_name=${new_name:-$SERVICE_NAME}
+        
+        # Validate service name (alphanumeric and hyphens only)
+        if ! [[ "$new_name" =~ ^[a-zA-Z0-9-]+$ ]]; then
+            echo -e "${RED}Invalid service name. Please use only letters, numbers, and hyphens.${NC}"
+            continue
+        fi
+        
+        SERVICE_NAME=$new_name
+        break
+    done
     
     # Ask for admin password
-    read -p "Enter admin password [$ADMIN_PASSWORD]: " new_password
-    ADMIN_PASSWORD=${new_password:-$ADMIN_PASSWORD}
+    while true; do
+        read -p "Enter admin password [$ADMIN_PASSWORD]: " new_password
+        new_password=${new_password:-$ADMIN_PASSWORD}
+        
+        # Validate password (not empty and minimum length)
+        if [ -z "$new_password" ]; then
+            echo -e "${RED}Password cannot be empty.${NC}"
+            continue
+        fi
+        
+        if [ ${#new_password} -lt 6 ]; then
+            echo -e "${YELLOW}Warning: Short passwords are insecure.${NC}"
+            if get_yes_no_input "Use this password anyway? (y/n): "; then
+                ADMIN_PASSWORD=$new_password
+                break
+            fi
+            continue
+        fi
+        
+        ADMIN_PASSWORD=$new_password
+        break
+    done
+    
+    # Check firewall for the selected port
+    check_firewall "$PORT"
     
     # Save the configuration
     save_config
@@ -143,11 +390,21 @@ deploy_service() {
     # Load configuration
     load_config
     
+    # Check system resources
+    check_system_resources
+    
+    # Check if port is available
+    if ! check_port_available "$PORT"; then
+        echo -e "${YELLOW}Port $PORT is already in use.${NC}"
+        if get_yes_no_input "Would you like to configure a different port? (y/n): "; then
+            configure_service
+        fi
+    fi
+    
     # Check if service is already running
     if check_service; then
         echo -e "${YELLOW}CIAO-CORS is already running.${NC}"
-        read -p "Do you want to stop it and redeploy? (y/n): " redeploy
-        if [[ $redeploy =~ ^[Yy]$ ]]; then
+        if get_yes_no_input "Do you want to stop it and redeploy? (y/n): "; then
             stop_service
         else
             echo -e "${YELLOW}Deployment cancelled.${NC}"
@@ -157,10 +414,22 @@ deploy_service() {
         fi
     fi
     
+    # Check firewall for the selected port
+    check_firewall "$PORT"
+    
     # Check if we need to clone the repository
     local repo_dir="$HOME/ciao-cors"
     if [ ! -d "$repo_dir" ]; then
         echo -e "${CYAN}Cloning the CIAO-CORS repository...${NC}"
+        
+        # Check if git is installed
+        if ! command -v git &> /dev/null; then
+            echo -e "${RED}Git is not installed. Please install git to continue.${NC}"
+            echo -e "${YELLOW}Press any key to return to the main menu...${NC}"
+            read -n 1
+            return
+        fi
+        
         git clone $REPO_URL "$repo_dir" || { 
             echo -e "${RED}Failed to clone repository. Please check your internet connection.${NC}"; 
             echo -e "${YELLOW}Press any key to return to the main menu...${NC}"
@@ -171,9 +440,14 @@ deploy_service() {
         echo -e "${CYAN}Repository already exists. Updating...${NC}"
         cd "$repo_dir" && git pull || {
             echo -e "${RED}Failed to update repository.${NC}"
-            echo -e "${YELLOW}Press any key to return to the main menu...${NC}"
-            read -n 1
-            return
+            if get_yes_no_input "Would you like to continue with the existing version? (y/n): "; then
+                echo -e "${YELLOW}Continuing with existing version...${NC}"
+            else
+                echo -e "${YELLOW}Deployment cancelled.${NC}"
+                echo -e "${YELLOW}Press any key to return to the main menu...${NC}"
+                read -n 1
+                return
+            fi
         }
     fi
     
@@ -203,27 +477,106 @@ WorkingDirectory=$repo_dir
 WantedBy=multi-user.target
 EOF
         
-        # Install service file
-        sudo mv /tmp/ciao-cors.service /etc/systemd/system/$SERVICE_NAME.service
-        sudo systemctl daemon-reload
-        sudo systemctl enable $SERVICE_NAME
-        sudo systemctl start $SERVICE_NAME
-        
-        echo -e "${GREEN}CIAO-CORS has been deployed as a systemd service!${NC}"
-        echo -e "${GREEN}Service name: $SERVICE_NAME${NC}"
-        echo -e "${GREEN}Service status: $(systemctl is-active $SERVICE_NAME)${NC}"
-        echo -e "${GREEN}Access the web interface at: http://localhost:$PORT${NC}"
+        # Check if sudo is available
+        if ! command -v sudo &> /dev/null; then
+            echo -e "${RED}Sudo is not available. Cannot install systemd service.${NC}"
+            echo -e "${YELLOW}Falling back to background process deployment...${NC}"
+        else
+            # Install service file
+            sudo mv /tmp/ciao-cors.service /etc/systemd/system/$SERVICE_NAME.service || {
+                echo -e "${RED}Failed to create systemd service. Falling back to background process.${NC}"
+                echo -e "${YELLOW}Continuing with background process deployment...${NC}"
+                systemd_failed=true
+            }
+            
+            if [ -z "$systemd_failed" ]; then
+                sudo systemctl daemon-reload
+                sudo systemctl enable $SERVICE_NAME
+                sudo systemctl start $SERVICE_NAME
+                
+                if systemctl is-active --quiet $SERVICE_NAME; then
+                    echo -e "${GREEN}CIAO-CORS has been deployed as a systemd service!${NC}"
+                    echo -e "${GREEN}Service name: $SERVICE_NAME${NC}"
+                    echo -e "${GREEN}Service status: $(systemctl is-active $SERVICE_NAME)${NC}"
+                    echo -e "${GREEN}Access the web interface at: http://localhost:$PORT${NC}"
+                    
+                    # Try to get the local IP address
+                    local ip=$(hostname -I 2>/dev/null | awk '{print $1}' || echo "localhost")
+                    if [ "$ip" != "localhost" ]; then
+                        echo -e "${GREEN}Access from other devices on your network: http://$ip:$PORT${NC}"
+                    fi
+                else
+                    echo -e "${RED}Failed to start systemd service. Falling back to background process.${NC}"
+                    systemd_failed=true
+                fi
+            fi
+        fi
     else
-        # Start as background process for non-systemd systems
-        echo -e "${CYAN}Starting as a background process...${NC}"
-        nohup deno run --allow-net --allow-env --allow-read $MAIN_FILE > ciao-cors.log 2>&1 &
-        echo $! > ciao-cors.pid
-        
-        echo -e "${GREEN}CIAO-CORS has been started in the background!${NC}"
-        echo -e "${GREEN}PID: $(cat ciao-cors.pid)${NC}"
-        echo -e "${GREEN}Access the web interface at: http://localhost:$PORT${NC}"
-        echo -e "${YELLOW}Logs are being written to: $repo_dir/ciao-cors.log${NC}"
+        # If not using systemd or systemd failed
+        systemd_failed=true
     fi
+    
+    # Start as background process if systemd not available or failed
+    if [ -n "$systemd_failed" ]; then
+        echo -e "${CYAN}Starting as a background process...${NC}"
+        
+        # Set environment variables
+        export PORT=$PORT
+        export ADMIN_PASSWORD=$ADMIN_PASSWORD
+        
+        # Start the process in the background
+        nohup deno run --allow-net --allow-env --allow-read $MAIN_FILE > ciao-cors.log 2>&1 &
+        local pid=$!
+        echo $pid > ciao-cors.pid
+        
+        # Check if process is still running after a short delay
+        sleep 2
+        if ps -p $pid > /dev/null; then
+            echo -e "${GREEN}CIAO-CORS has been started in the background!${NC}"
+            echo -e "${GREEN}PID: $pid${NC}"
+            echo -e "${GREEN}Access the web interface at: http://localhost:$PORT${NC}"
+            
+            # Try to get the local IP address
+            local ip=$(hostname -I 2>/dev/null | awk '{print $1}' || echo "localhost")
+            if [ "$ip" != "localhost" ]; then
+                echo -e "${GREEN}Access from other devices on your network: http://$ip:$PORT${NC}"
+            fi
+            
+            echo -e "${YELLOW}Logs are being written to: $repo_dir/ciao-cors.log${NC}"
+            
+            # Create start/stop scripts for convenience
+            echo "#!/bin/bash
+cd \"$repo_dir\"
+export PORT=$PORT
+export ADMIN_PASSWORD=$ADMIN_PASSWORD
+nohup deno run --allow-net --allow-env --allow-read $MAIN_FILE > ciao-cors.log 2>&1 &
+echo \$! > ciao-cors.pid
+echo \"CIAO-CORS started with PID: \$(cat ciao-cors.pid)\"" > "$repo_dir/start-ciao-cors.sh"
+            
+            echo "#!/bin/bash
+cd \"$repo_dir\"
+if [ -f ciao-cors.pid ]; then
+    kill \$(cat ciao-cors.pid) 2>/dev/null
+    rm ciao-cors.pid
+    echo \"CIAO-CORS stopped\"
+else
+    echo \"PID file not found, trying to find and kill the process...\"
+    pkill -f \"deno run.*$SERVICE_NAME\"
+    echo \"Sent kill signal to CIAO-CORS processes\"
+fi" > "$repo_dir/stop-ciao-cors.sh"
+            
+            chmod +x "$repo_dir/start-ciao-cors.sh" "$repo_dir/stop-ciao-cors.sh"
+            echo -e "${BLUE}Created start/stop scripts:${NC}"
+            echo -e "${BLUE}- To start: $repo_dir/start-ciao-cors.sh${NC}"
+            echo -e "${BLUE}- To stop: $repo_dir/stop-ciao-cors.sh${NC}"
+        else
+            echo -e "${RED}Failed to start CIAO-CORS as a background process.${NC}"
+            echo -e "${YELLOW}Check the log file for errors: $repo_dir/ciao-cors.log${NC}"
+        fi
+    fi
+    
+    # Offer to create command shortcut
+    create_command_shortcut
     
     echo ""
     echo -e "${YELLOW}Press any key to return to the main menu...${NC}"
@@ -435,18 +788,9 @@ update_service() {
     echo -e "${CYAN}==== Updating CIAO-CORS ====${NC}"
     echo ""
     
-    # Check if repository exists
-    local repo_dir="$HOME/ciao-cors"
-    if [ ! -d "$repo_dir" ]; then
-        echo -e "${RED}Repository not found. Please deploy the service first.${NC}"
-        echo -e "${YELLOW}Press any key to return to the main menu...${NC}"
-        read -n 1
-        return
-    fi
-    
     # Pull latest changes
     echo -e "${CYAN}Pulling latest changes from repository...${NC}"
-    cd "$repo_dir" && git pull || {
+    cd "$HOME/ciao-cors" && git pull || {
         echo -e "${RED}Failed to update repository. Please check your internet connection.${NC}"
         echo -e "${YELLOW}Press any key to return to the main menu...${NC}"
         read -n 1
@@ -481,6 +825,8 @@ main_menu() {
         echo -e "  ${BLUE}6)${NC} Stop Service"
         echo -e "  ${BLUE}7)${NC} Update Service"
         echo -e "  ${BLUE}8)${NC} Uninstall Service"
+        echo -e "  ${BLUE}9)${NC} Create Command Shortcut"
+        echo -e "  ${BLUE}h)${NC} Help & Documentation"
         echo -e "  ${RED}0)${NC} Exit"
         echo ""
         read -p "Please select an option: " choice
@@ -494,6 +840,8 @@ main_menu() {
             6) stop_service ;;
             7) update_service ;;
             8) uninstall_service ;;
+            9) create_command_shortcut; echo -e "${YELLOW}Press any key to return to the main menu...${NC}"; read -n 1 ;;
+            h|H) show_help; echo -e "${YELLOW}Press any key to return to the main menu...${NC}"; read -n 1 ;;
             0) 
                 clear
                 echo -e "${GREEN}Thank you for using CIAO-CORS!${NC}"
@@ -508,6 +856,38 @@ main_menu() {
     done
 }
 
+# Function to show help and documentation
+show_help() {
+    show_banner
+    echo -e "${CYAN}==== CIAO-CORS Help & Documentation ====${NC}"
+    echo ""
+    echo -e "${BLUE}CIAO-CORS${NC} is a comprehensive CORS proxy with web management interface."
+    echo -e "This script helps you deploy and manage your CIAO-CORS installation."
+    echo ""
+    echo -e "${CYAN}Available Commands:${NC}"
+    echo -e "  ${BLUE}1. Deploy CIAO-CORS${NC} - Install and start the CIAO-CORS service"
+    echo -e "  ${BLUE}2. Configure Service${NC} - Modify port, service name, and admin password"
+    echo -e "  ${BLUE}3. View Status${NC} - Check if the service is running and view details"
+    echo -e "  ${BLUE}4. View Logs${NC} - Display service logs"
+    echo -e "  ${BLUE}5. Restart Service${NC} - Stop and start the service"
+    echo -e "  ${BLUE}6. Stop Service${NC} - Stop the running service"
+    echo -e "  ${BLUE}7. Update Service${NC} - Update to the latest version from GitHub"
+    echo -e "  ${BLUE}8. Uninstall Service${NC} - Remove CIAO-CORS from your system"
+    echo -e "  ${BLUE}9. Create Command Shortcut${NC} - Create an alias to run this script easily"
+    echo ""
+    echo -e "${CYAN}Usage After Installation:${NC}"
+    echo -e "  - Access the web interface at http://localhost:$PORT"
+    echo -e "  - Log in with the admin password you configured"
+    echo -e "  - Configure your CORS proxy settings through the web interface"
+    echo ""
+    echo -e "${CYAN}Command Shortcut:${NC}"
+    echo -e "  After creating a command shortcut, you can run this script by simply typing:"
+    echo -e "  ${YELLOW}$ALIAS_NAME${NC}"
+    echo ""
+    echo -e "${CYAN}Need More Help?${NC}"
+    echo -e "  Visit the GitHub repository: ${BLUE}$REPO_URL${NC}"
+}
+
 # Check if running with admin/root privileges for certain operations
 check_privileges() {
     if [[ "$OSTYPE" == "linux-gnu"* ]] && [ "$EUID" -ne 0 ]; then
@@ -520,4 +900,19 @@ check_privileges() {
 # --- Main Script Execution ---
 check_privileges
 load_config
+
+# Check for updates
+if [ -d "$HOME/ciao-cors" ] && command -v git &> /dev/null; then
+    cd "$HOME/ciao-cors"
+    git fetch -q
+    LOCAL=$(git rev-parse HEAD)
+    REMOTE=$(git rev-parse @{u})
+    
+    if [ "$LOCAL" != "$REMOTE" ]; then
+        echo -e "${YELLOW}Update available for CIAO-CORS!${NC}"
+        echo -e "${BLUE}Run the 'Update Service' option to get the latest features.${NC}"
+        sleep 2
+    fi
+fi
+
 main_menu
