@@ -1,0 +1,17 @@
+{
+  "name": "ciao-cors",
+  "version": "1.0.0",
+  "description": "A comprehensive CORS proxy with web management interface",
+  "main": "main.ts",
+  "exports": "./main.ts",
+  "tasks": {
+    "dev": "deno run --allow-net --allow-env --allow-read --allow-write main.ts",
+    "start": "deno run --allow-net --allow-env --allow-read --allow-write main.ts"
+  },
+  "permissions": {
+    "net": true,
+    "env": true,
+    "read": true,
+    "write": true
+  }
+}
