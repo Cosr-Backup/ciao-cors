@@ -264,6 +264,20 @@ async function handleAPIRequest(request: Request): Promise<Response> {
     }
   }
   
+  // Session check endpoint - accessible without full auth
+  if (pathname === "/api/session" && method === "GET") {
+    const sessionValid = validateSession(request);
+    return new Response(JSON.stringify({ 
+      authenticated: sessionValid,
+      timestamp: new Date().toISOString()
+    }), {
+      headers: { 
+        "Content-Type": "application/json",
+        ...Object.fromEntries(createCORSHeaders(request))
+      }
+    });
+  }
+  
   // All other API endpoints require authentication
   if (!validateSession(request)) {
     console.log(`Unauthorized API access attempt to ${pathname} from ${getClientIP(request)}`);
@@ -301,42 +315,6 @@ async function handleAPIRequest(request: Request): Promise<Response> {
       return new Response(JSON.stringify(stats), {
         headers: { "Content-Type": "application/json", ...Object.fromEntries(createCORSHeaders(request)) }
       });
-    } else if (pathname === "/api/auth") {
-      if (method === "POST") {
-        const { password } = await request.json();
-        if (password === ADMIN_PASSWORD) {
-          const sessionId = generateUniqueId();
-          const clientIP = getClientIP(request);
-          sessionMap.set(sessionId, {
-            authenticated: true,
-            loginTime: new Date().toISOString(),
-            ip: clientIP
-          });
-          console.log(`Login successful: Created session ${sessionId} for IP ${clientIP}`);
-          return new Response(JSON.stringify({ success: true, sessionId }), {
-            headers: { 
-              "Content-Type": "application/json",
-              "Set-Cookie": `session=${sessionId}; Path=/; HttpOnly; SameSite=Lax; Max-Age=86400`,
-              ...Object.fromEntries(createCORSHeaders(request))
-            }
-          });
-        } else {
-          console.log(`Login failed: Invalid password attempt from ${getClientIP(request)}`);
-          return createErrorResponse(401, "Invalid password");
-        }
-      } else if (method === "DELETE") {
-        const sessionId = getCookieValue(request, "session");
-        if (sessionId) {
-          sessionMap.delete(sessionId);
-        }
-        return new Response(JSON.stringify({ success: true, message: "Logged out" }), {
-          headers: { 
-            "Content-Type": "application/json",
-            "Set-Cookie": "session=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0",
-            ...Object.fromEntries(createCORSHeaders(request))
-          }
-        });
-      }
     } else if (pathname === "/api/apikeys") {
       if (method === "POST") {
         const { name } = await request.json();
@@ -869,14 +847,9 @@ async function handleLoginPage(request: Request): Promise<Response> {
             background: rgba(231,76,60,0.8); color: white; padding: 10px; 
             border-radius: 5px; margin-bottom: 20px; display: none;
         }
-        .debug-info {
-            margin-top: 20px;
-            padding: 10px;
-            background: rgba(0,0,0,0.3);
-            color: rgba(255,255,255,0.7);
-            border-radius: 5px;
-            font-size: 12px;
-            display: none;
+        .success {
+            background: rgba(39,174,96,0.8); color: white; padding: 10px;
+            border-radius: 5px; margin-bottom: 20px; display: none;
         }
     </style>
 </head>
@@ -888,6 +861,7 @@ async function handleLoginPage(request: Request): Promise<Response> {
         </div>
         
         <div id="error" class="error"></div>
+        <div id="success" class="success"></div>
         
         <form id="loginForm" onsubmit="handleLogin(event)">
             <div class="form-group">
@@ -898,8 +872,6 @@ async function handleLoginPage(request: Request): Promise<Response> {
         </form>
         
         <a href="/" class="back-link">← 返回首页</a>
-        
-        <div id="debugInfo" class="debug-info"></div>
     </div>
 
     <script>
@@ -908,10 +880,11 @@ async function handleLoginPage(request: Request): Promise<Response> {
             
             const password = document.getElementById('password').value;
             const errorDiv = document.getElementById('error');
-            const debugDiv = document.getElementById('debugInfo');
+            const successDiv = document.getElementById('success');
             
             try {
                 errorDiv.style.display = 'none';
+                successDiv.style.display = 'none';
                 
                 const response = await fetch('/api/auth', {
                     method: 'POST',
@@ -922,38 +895,34 @@ async function handleLoginPage(request: Request): Promise<Response> {
                 const result = await response.json();
                 
                 if (response.ok && result.success) {
-                    window.location.href = '/admin';
+                    successDiv.textContent = '登录成功，正在跳转...';
+                    successDiv.style.display = 'block';
+                    setTimeout(() => {
+                        window.location.href = '/admin';
+                    }, 1000);
                 } else {
                     errorDiv.textContent = '密码错误，请重试';
                     errorDiv.style.display = 'block';
                     document.getElementById('password').value = '';
-                    
-                    // Debug info
-                    debugDiv.textContent = '请求状态: ' + response.status + ' ' + response.statusText;
-                    debugDiv.style.display = 'block';
                 }
             } catch (error) {
                 errorDiv.textContent = '登录失败：' + error.message;
                 errorDiv.style.display = 'block';
-                
-                // Debug info
-                debugDiv.textContent = '错误详情: ' + JSON.stringify(error);
-                debugDiv.style.display = 'block';
             }
         }
         
         // 检查会话状态
         async function checkSession() {
             try {
-                const response = await fetch('/api/stats');
+                const response = await fetch('/api/session');
                 if (response.ok) {
-                    window.location.href = '/admin';
-                } else if (response.status === 401) {
-                    // 未登录，留在登录页面
-                    console.log('需要登录');
+                    const result = await response.json();
+                    if (result.authenticated) {
+                        window.location.href = '/admin';
+                    }
                 }
             } catch (e) {
-                console.error('会话检查失败:', e);
+                console.log('Session check failed, staying on login page');
             }
         }
         
