@@ -220,8 +220,53 @@ async function handleAPIRequest(request: Request): Promise<Response> {
   const pathname = url.pathname;
   const method = request.method;
   
-  // 需要认证的API路径
+  // Auth endpoint should be accessible without session
+  if (pathname === "/api/auth") {
+    if (method === "POST") {
+      try {
+        const { password } = await request.json();
+        if (password === ADMIN_PASSWORD) {
+          const sessionId = generateUniqueId();
+          const clientIP = getClientIP(request);
+          sessionMap.set(sessionId, {
+            authenticated: true,
+            loginTime: new Date().toISOString(),
+            ip: clientIP
+          });
+          console.log(`Login successful: Created session ${sessionId} for IP ${clientIP}`);
+          return new Response(JSON.stringify({ success: true, sessionId }), {
+            headers: { 
+              "Content-Type": "application/json",
+              "Set-Cookie": `session=${sessionId}; Path=/; HttpOnly; SameSite=Lax; Max-Age=86400`,
+              ...Object.fromEntries(createCORSHeaders(request))
+            }
+          });
+        } else {
+          console.log(`Login failed: Invalid password attempt from ${getClientIP(request)}`);
+          return createErrorResponse(401, "Invalid password");
+        }
+      } catch (error) {
+        console.error("Login error:", error);
+        return createErrorResponse(400, "Invalid request format", error.message);
+      }
+    } else if (method === "DELETE") {
+      const sessionId = getCookieValue(request, "session");
+      if (sessionId) {
+        sessionMap.delete(sessionId);
+      }
+      return new Response(JSON.stringify({ success: true, message: "Logged out" }), {
+        headers: { 
+          "Content-Type": "application/json",
+          "Set-Cookie": "session=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0",
+          ...Object.fromEntries(createCORSHeaders(request))
+        }
+      });
+    }
+  }
+  
+  // All other API endpoints require authentication
   if (!validateSession(request)) {
+    console.log(`Unauthorized API access attempt to ${pathname} from ${getClientIP(request)}`);
     return createErrorResponse(401, "Authentication required");
   }
   
@@ -267,14 +312,16 @@ async function handleAPIRequest(request: Request): Promise<Response> {
             loginTime: new Date().toISOString(),
             ip: clientIP
           });
+          console.log(`Login successful: Created session ${sessionId} for IP ${clientIP}`);
           return new Response(JSON.stringify({ success: true, sessionId }), {
             headers: { 
               "Content-Type": "application/json",
-              "Set-Cookie": `session=${sessionId}; HttpOnly; SameSite=Strict; Max-Age=86400`,
+              "Set-Cookie": `session=${sessionId}; Path=/; HttpOnly; SameSite=Lax; Max-Age=86400`,
               ...Object.fromEntries(createCORSHeaders(request))
             }
           });
         } else {
+          console.log(`Login failed: Invalid password attempt from ${getClientIP(request)}`);
           return createErrorResponse(401, "Invalid password");
         }
       } else if (method === "DELETE") {
@@ -285,7 +332,7 @@ async function handleAPIRequest(request: Request): Promise<Response> {
         return new Response(JSON.stringify({ success: true, message: "Logged out" }), {
           headers: { 
             "Content-Type": "application/json",
-            "Set-Cookie": "session=; HttpOnly; SameSite=Strict; Max-Age=0",
+            "Set-Cookie": "session=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0",
             ...Object.fromEntries(createCORSHeaders(request))
           }
         });
@@ -822,6 +869,15 @@ async function handleLoginPage(request: Request): Promise<Response> {
             background: rgba(231,76,60,0.8); color: white; padding: 10px; 
             border-radius: 5px; margin-bottom: 20px; display: none;
         }
+        .debug-info {
+            margin-top: 20px;
+            padding: 10px;
+            background: rgba(0,0,0,0.3);
+            color: rgba(255,255,255,0.7);
+            border-radius: 5px;
+            font-size: 12px;
+            display: none;
+        }
     </style>
 </head>
 <body>
@@ -842,6 +898,8 @@ async function handleLoginPage(request: Request): Promise<Response> {
         </form>
         
         <a href="/" class="back-link">← 返回首页</a>
+        
+        <div id="debugInfo" class="debug-info"></div>
     </div>
 
     <script>
@@ -850,8 +908,11 @@ async function handleLoginPage(request: Request): Promise<Response> {
             
             const password = document.getElementById('password').value;
             const errorDiv = document.getElementById('error');
+            const debugDiv = document.getElementById('debugInfo');
             
             try {
+                errorDiv.style.display = 'none';
+                
                 const response = await fetch('/api/auth', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
@@ -866,19 +927,38 @@ async function handleLoginPage(request: Request): Promise<Response> {
                     errorDiv.textContent = '密码错误，请重试';
                     errorDiv.style.display = 'block';
                     document.getElementById('password').value = '';
+                    
+                    // Debug info
+                    debugDiv.textContent = '请求状态: ' + response.status + ' ' + response.statusText;
+                    debugDiv.style.display = 'block';
                 }
             } catch (error) {
                 errorDiv.textContent = '登录失败：' + error.message;
                 errorDiv.style.display = 'block';
+                
+                // Debug info
+                debugDiv.textContent = '错误详情: ' + JSON.stringify(error);
+                debugDiv.style.display = 'block';
             }
         }
         
-        // 如果已经登录，直接跳转
-        fetch('/api/stats').then(response => {
-            if (response.ok) {
-                window.location.href = '/admin';
+        // 检查会话状态
+        async function checkSession() {
+            try {
+                const response = await fetch('/api/stats');
+                if (response.ok) {
+                    window.location.href = '/admin';
+                } else if (response.status === 401) {
+                    // 未登录，留在登录页面
+                    console.log('需要登录');
+                }
+            } catch (e) {
+                console.error('会话检查失败:', e);
             }
-        }).catch(() => {});
+        }
+        
+        // 页面加载时检查会话
+        checkSession();
     </script>
 </body>
 </html>`;
@@ -965,10 +1045,16 @@ function validateAPIKey(apiKey: string): boolean {
  */
 function validateSession(request: Request): boolean {
   const sessionId = getCookieValue(request, "session");
-  if (!sessionId) return false;
+  if (!sessionId) {
+    console.log("No session cookie found");
+    return false;
+  }
   
   const session = sessionMap.get(sessionId);
-  if (!session || !session.authenticated) return false;
+  if (!session || !session.authenticated) {
+    console.log(`Invalid session: ${sessionId}`);
+    return false;
+  }
   
   // 检查会话是否过期（24小时）
   const loginTime = new Date(session.loginTime);
@@ -976,6 +1062,7 @@ function validateSession(request: Request): boolean {
   const hoursDiff = (now.getTime() - loginTime.getTime()) / (1000 * 60 * 60);
   
   if (hoursDiff > 24) {
+    console.log(`Session expired: ${sessionId}`);
     sessionMap.delete(sessionId);
     return false;
   }
@@ -1288,7 +1375,7 @@ function getCookieValue(request: Request, name: string): string | null {
   const cookies = cookieHeader.split(';');
   for (const cookie of cookies) {
     const [key, value] = cookie.trim().split('=');
-    if (key === name) {
+    if (key === name && value) {
       return value;
     }
   }
@@ -1375,6 +1462,13 @@ function initializeApp(): void {
   console.log("🚀 Starting CIAO-CORS Proxy Server...");
   loadConfig();
   startCleanupTasks();
+  
+  // 预设一个管理员密码用于演示
+  console.log(`ℹ️ Admin password is set to: ${ADMIN_PASSWORD}`);
+  if (ADMIN_PASSWORD === "admin123") {
+    console.log("⚠️ WARNING: Using default admin password! Change this in production!");
+  }
+  
   console.log("✅ CIAO-CORS Proxy Server is ready!");
 }
 
