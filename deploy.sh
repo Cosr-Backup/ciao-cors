@@ -27,6 +27,8 @@ REPO_URL="https://github.com/bestZwei/ciao-cors"
 MAIN_FILE="main.ts"
 SCRIPT_PATH=$(realpath "$0")
 ALIAS_NAME="ciaocors"
+SCRIPT_VERSION="1.0"
+SCRIPT_UPDATE_DATE=$(date -r "$SCRIPT_PATH" "+%Y-%m-%d %H:%M:%S" 2>/dev/null || stat -f "%Sm" "$SCRIPT_PATH" 2>/dev/null || echo "Unknown")
 
 # Function to display the beautiful banner
 show_banner() {
@@ -37,10 +39,11 @@ show_banner() {
     echo '| |       | |    /  \ | |  | |    | |     | |  | | |__) | (___  '
     echo '| |       | |   / /\ \| |  | |    | |     | |  | |  _  / \___ \ '
     echo '| |____  _| |_ / ____ \ |__| |    | |____ | |__| | | \ \ ____) |'
-    echo ' \_____| |____/_/    \_\____/      \______|\____/|_|  \_\_____/ '
+    echo ' \_____|_____/_/    \_\____/      \______|\____/|_|  \_\_____/ '
     echo -e "${NC}"
     echo -e "${CYAN}Comprehensive CORS Proxy with Web Management Interface${NC}"
     echo -e "${PURPLE}=================================================${NC}"
+    echo -e "${YELLOW}Script Version: ${SCRIPT_VERSION} | Last Updated: ${SCRIPT_UPDATE_DATE}${NC}"
     echo ""
 }
 
@@ -284,6 +287,61 @@ save_config() {
     echo "SERVICE_NAME=$SERVICE_NAME" >> "$CONFIG_FILE"
     echo "ADMIN_PASSWORD=$ADMIN_PASSWORD" >> "$CONFIG_FILE"
     echo -e "${GREEN}Configuration saved to $CONFIG_FILE${NC}"
+    
+    # If service is running, ask to restart to apply changes
+    if check_service; then
+        echo -e "${YELLOW}The service is currently running with the old configuration.${NC}"
+        if get_yes_no_input "Would you like to restart the service to apply the new configuration? (y/n): "; then
+            restart_service
+        else
+            echo -e "${YELLOW}Configuration changes will take effect after the next restart.${NC}"
+        fi
+    fi
+    
+    # If systemd service exists, update it
+    if [[ "$OSTYPE" == "linux-gnu"* ]] && systemctl list-unit-files | grep -q "$SERVICE_NAME.service"; then
+        echo -e "${CYAN}Updating systemd service with new configuration...${NC}"
+        
+        # Create updated service file
+        cat > /tmp/ciao-cors.service << EOF
+[Unit]
+Description=CIAO-CORS Proxy Service
+After=network.target
+
+[Service]
+Environment="PORT=$PORT"
+Environment="ADMIN_PASSWORD=$ADMIN_PASSWORD"
+ExecStart=$(which deno) run --allow-net --allow-env --allow-read $HOME/ciao-cors/$MAIN_FILE
+Restart=on-failure
+User=$(whoami)
+WorkingDirectory=$HOME/ciao-cors
+
+[Install]
+WantedBy=multi-user.target
+EOF
+        
+        # Install updated service file
+        if sudo mv /tmp/ciao-cors.service /etc/systemd/system/$SERVICE_NAME.service; then
+            sudo systemctl daemon-reload
+            echo -e "${GREEN}Systemd service updated successfully.${NC}"
+        else
+            echo -e "${RED}Failed to update systemd service file.${NC}"
+        fi
+    fi
+    
+    # Update start script if it exists
+    local repo_dir="$HOME/ciao-cors"
+    if [ -f "$repo_dir/start-ciao-cors.sh" ]; then
+        echo "#!/bin/bash
+cd \"$repo_dir\"
+export PORT=$PORT
+export ADMIN_PASSWORD=$ADMIN_PASSWORD
+nohup deno run --allow-net --allow-env --allow-read $MAIN_FILE > ciao-cors.log 2>&1 &
+echo \$! > ciao-cors.pid
+echo \"CIAO-CORS started with PID: \$(cat ciao-cors.pid)\"" > "$repo_dir/start-ciao-cors.sh"
+        chmod +x "$repo_dir/start-ciao-cors.sh"
+        echo -e "${GREEN}Start script updated with new configuration.${NC}"
+    fi
 }
 
 # Function to configure the service
@@ -294,6 +352,11 @@ configure_service() {
     
     # Load current configuration if it exists
     load_config
+    
+    local old_port="$PORT"
+    local old_service_name="$SERVICE_NAME"
+    local old_admin_password="$ADMIN_PASSWORD"
+    local config_changed=false
     
     # Ask for port
     while true; do
@@ -357,14 +420,22 @@ configure_service() {
         break
     done
     
+    # Check if configuration actually changed
+    if [ "$old_port" != "$PORT" ] || [ "$old_service_name" != "$SERVICE_NAME" ] || [ "$old_admin_password" != "$ADMIN_PASSWORD" ]; then
+        config_changed=true
+    fi
+    
     # Check firewall for the selected port
     check_firewall "$PORT"
     
-    # Save the configuration
-    save_config
+    # Save the configuration if changed
+    if $config_changed; then
+        save_config
+        echo -e "${GREEN}Configuration updated successfully!${NC}"
+    else
+        echo -e "${BLUE}No changes were made to the configuration.${NC}"
+    fi
     
-    echo ""
-    echo -e "${GREEN}Configuration updated successfully!${NC}"
     echo -e "${YELLOW}Press any key to return to the main menu...${NC}"
     read -n 1
 }
@@ -829,6 +900,12 @@ main_menu() {
         echo -e "  ${BLUE}h)${NC} Help & Documentation"
         echo -e "  ${RED}0)${NC} Exit"
         echo ""
+        
+        # Show current configuration
+        echo -e "${CYAN}Current Configuration:${NC}"
+        echo -e "  Port: ${GREEN}$PORT${NC} | Service Name: ${GREEN}$SERVICE_NAME${NC} | Admin Password: ${GREEN}$(echo $ADMIN_PASSWORD | sed 's/./*/g')${NC}"
+        echo ""
+        
         read -p "Please select an option: " choice
         
         case $choice in
