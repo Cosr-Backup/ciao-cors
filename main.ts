@@ -110,7 +110,7 @@ async function handleProxyRequest(request: Request): Promise<Response> {
   const userAgent = request.headers.get("user-agent") || "";
   const origin = request.headers.get("origin") || "";
   const apiKey = request.headers.get("x-api-key") || url.searchParams.get("key") || "";
-  
+
   try {
     // 提取目标URL
     let targetUrl = url.pathname.substring(1); // 去掉开头的 /
@@ -162,15 +162,21 @@ async function handleProxyRequest(request: Request): Promise<Response> {
     // 添加标识头部
     proxyHeaders.set('User-Agent', userAgent || 'CIAO-CORS-Proxy/1.0');
     
+    // 处理请求体（修复 Deno request.body 只能读取一次的问题）
+    let proxyBody: BodyInit | null = null;
+    if (["POST", "PUT", "PATCH", "DELETE"].includes(request.method)) {
+      // 复制 body
+      proxyBody = await request.clone().arrayBuffer();
+      if (proxyBody && (proxyBody as ArrayBuffer).byteLength === 0) {
+        proxyBody = null;
+      }
+    }
+
     const proxyOptions: RequestInit = {
       method: request.method,
       headers: proxyHeaders,
+      body: proxyBody
     };
-    
-    // 处理请求体
-    if (["POST", "PUT", "PATCH", "DELETE"].includes(request.method)) {
-      proxyOptions.body = request.body;
-    }
     
     // 发起代理请求
     const response = await fetch(targetUrl, proxyOptions);
@@ -195,16 +201,17 @@ async function handleProxyRequest(request: Request): Promise<Response> {
     // 记录日志
     const responseTime = Date.now() - startTime;
     logRequest(request, proxyResponse, targetUrl, responseTime);
-    
+
     // 更新频率限制（减少并发计数）
     updateRateLimit(clientKey, false);
-    
+
     return proxyResponse;
-    
+
   } catch (error) {
     console.error("Proxy error:", error);
     const responseTime = Date.now() - startTime;
-    const errorResponse = createErrorResponse(502, "Proxy request failed", error.message);
+    // 修复: 传递 request 保证 CORS 头正确
+    const errorResponse = createErrorResponse(502, "Proxy request failed", error.message, request);
     logRequest(request, errorResponse, undefined, responseTime);
     updateRateLimit(clientIP, false);
     return errorResponse;
@@ -1384,19 +1391,20 @@ function createCORSHeaders(request: Request): Headers {
  * 创建错误响应
  * 标准化的错误响应格式
  */
-function createErrorResponse(code: number, message: string, details?: any): Response {
+function createErrorResponse(code: number, message: string, details?: any, request?: Request): Response {
   const body = JSON.stringify({
     code,
     message,
     details,
     timestamp: new Date().toISOString()
   });
-  
+  // 修复: 使用原始 request 生成 CORS 头
+  const corsHeaders = createCORSHeaders(request || new Request("http://localhost"));
   return new Response(body, {
     status: code >= 400 && code < 500 ? code : 500,
     headers: {
       "Content-Type": "application/json",
-      ...Object.fromEntries(createCORSHeaders(new Request("http://localhost")).entries())
+      ...Object.fromEntries(corsHeaders.entries())
     }
   });
 }
@@ -1442,13 +1450,21 @@ function initializeApp(): void {
 }
 
 // ===== Deno Deploy 入口点 =====
+let initialized = false; // 防止多次初始化
+
 export default {
   async fetch(request: Request, env: any, ctx: any): Promise<Response> {
     try {
+      // Deno Deploy 环境下首次请求时初始化
+      if (!initialized) {
+        initializeApp();
+        initialized = true;
+      }
       return await handleRequest(request);
     } catch (error) {
       console.error("Error handling request:", error);
-      return createErrorResponse(500, "Internal Server Error", error.message);
+      // 修复: 传递原始 request 以保证 CORS 头正确
+      return createErrorResponse(500, "Internal Server Error", error.message, request);
     }
   }
 };
