@@ -362,11 +362,11 @@ async function handleAdminInterface(request: Request): Promise<Response> {
   }
   
   const adminHTML = `<!DOCTYPE html>
-<html lang="zh-CN">
+<html lang="en">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>CIAO-CORS - 管理界面</title>
+    <title>CIAO-CORS - Admin Dashboard</title>
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
         body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif; background: #f5f7fa; color: #2c3e50; }
@@ -398,78 +398,78 @@ async function handleAdminInterface(request: Request): Promise<Response> {
 <body>
     <div class="container">
         <div class="header">
-            <h1>🌐 CIAO-CORS 管理界面</h1>
-            <p>全功能 CORS 代理服务管理控制台</p>
-            <button class="btn btn-danger logout" onclick="logout()">退出登录</button>
+            <h1>🌐 CIAO-CORS Admin Dashboard</h1>
+            <p>Full-featured CORS proxy service management console</p>
+            <button class="btn btn-danger logout" onclick="logout()">Logout</button>
             <div class="nav">
-                <button class="nav-btn active" onclick="showSection('stats')">统计概览</button>
-                <button class="nav-btn" onclick="showSection('config')">配置管理</button>
-                <button class="nav-btn" onclick="showSection('logs')">请求日志</button>
-                <button class="nav-btn" onclick="showSection('apikeys')">API密钥</button>
+                <button class="nav-btn active" onclick="showSection('stats')">Statistics Overview</button>
+                <button class="nav-btn" onclick="showSection('config')">Configuration</button>
+                <button class="nav-btn" onclick="showSection('logs')">Request Logs</button>
+                <button class="nav-btn" onclick="showSection('apikeys')">API Keys</button>
             </div>
         </div>
 
         <div id="stats" class="section active">
-            <h2>📊 统计概览</h2>
+            <h2>📊 Statistics Overview</h2>
             <div class="stats-grid" id="statsGrid">
                 <div class="stat-card">
                     <div class="stat-number" id="totalRequests">-</div>
-                    <div>总请求数</div>
+                    <div>Total Requests</div>
                 </div>
                 <div class="stat-card">
                     <div class="stat-number" id="hourlyRequests">-</div>
-                    <div>每小时请求</div>
+                    <div>Requests per Hour</div>
                 </div>
                 <div class="stat-card">
                     <div class="stat-number" id="errorRate">-</div>
-                    <div>错误率</div>
+                    <div>Error Rate</div>
                 </div>
                 <div class="stat-card">
                     <div class="stat-number" id="avgResponseTime">-</div>
-                    <div>平均响应时间(ms)</div>
+                    <div>Avg Response Time (ms)</div>
                 </div>
             </div>
         </div>
 
         <div id="config" class="section">
-            <h2>⚙️ 配置管理</h2>
+            <h2>⚙️ Configuration Management</h2>
             <div class="form-group">
-                <label>允许的来源域名（每行一个）</label>
+                <label>Allowed Origins (one per line)</label>
                 <textarea id="allowedOrigins" rows="3" placeholder="*\nhttps://example.com"></textarea>
             </div>
             <div class="form-group">
-                <label>阻止的来源域名（每行一个）</label>
+                <label>Blocked Origins (one per line)</label>
                 <textarea id="blockedOrigins" rows="3"></textarea>
             </div>
             <div class="form-group">
-                <label>每分钟请求限制</label>
+                <label>Requests per Minute Limit</label>
                 <input type="number" id="requestsPerMinute" placeholder="60">
             </div>
             <div class="form-group">
-                <label>最大并发请求数</label>
+                <label>Maximum Concurrent Requests</label>
                 <input type="number" id="maxConcurrent" placeholder="10">
             </div>
             <div class="form-group">
                 <label>
-                    <input type="checkbox" id="requireAuth"> 要求API密钥认证
+                    <input type="checkbox" id="requireAuth"> Require API Key Authentication
                 </label>
             </div>
-            <button class="btn btn-primary" onclick="saveConfig()">保存配置</button>
-            <button class="btn btn-danger" onclick="resetConfig()">重置为默认</button>
+            <button class="btn btn-primary" onclick="saveConfig()">Save Configuration</button>
+            <button class="btn btn-danger" onclick="resetConfig()">Reset to Default</button>
         </div>
 
         <div id="logs" class="section">
-            <h2>📝 请求日志</h2>
-            <button class="btn btn-primary" onclick="refreshLogs()">刷新日志</button>
+            <h2>📝 Request Logs</h2>
+            <button class="btn btn-primary" onclick="refreshLogs()">Refresh Logs</button>
             <table class="table">
                 <thead>
                     <tr>
-                        <th>时间</th>
-                        <th>方法</th>
-                        <th>目标URL</th>
-                        <th>客户端IP</th>
-                        <th>状态码</th>
-                        <th>响应时间</th>
+                        <th>Time</th>
+                        <th>Method</th>
+                        <th>Target URL</th>
+                        <th>Client IP</th>
+                        <th>Status Code</th>
+                        <th>Response Time</th>
                     </tr>
                 </thead>
                 <tbody id="logsTable">
@@ -478,20 +478,20 @@ async function handleAdminInterface(request: Request): Promise<Response> {
         </div>
 
         <div id="apikeys" class="section">
-            <h2>🔑 API密钥管理</h2>
+            <h2>🔑 API Key Management</h2>
             <div class="form-group">
-                <label>密钥名称</label>
-                <input type="text" id="newKeyName" placeholder="输入密钥名称">
-                <button class="btn btn-success" onclick="createAPIKey()">创建新密钥</button>
+                <label>Key Name</label>
+                <input type="text" id="newKeyName" placeholder="Enter key name">
+                <button class="btn btn-success" onclick="createAPIKey()">Create New Key</button>
             </div>
             <table class="table">
                 <thead>
                     <tr>
-                        <th>密钥名称</th>
-                        <th>密钥</th>
-                        <th>创建时间</th>
-                        <th>状态</th>
-                        <th>操作</th>
+                        <th>Key Name</th>
+                        <th>Key</th>
+                        <th>Created Time</th>
+                        <th>Status</th>
+                        <th>Actions</th>
                     </tr>
                 </thead>
                 <tbody id="apiKeysTable">
@@ -558,25 +558,25 @@ async function handleAdminInterface(request: Request): Promise<Response> {
                     body: JSON.stringify(newConfig)
                 });
                 if (response.ok) {
-                    alert('配置保存成功！');
+                    alert('Configuration saved successfully!');
                 } else {
-                    alert('配置保存失败！');
+                    alert('Failed to save configuration!');
                 }
             } catch (e) {
-                alert('配置保存失败：' + e.message);
+                alert('Failed to save configuration: ' + e.message);
             }
         }
 
         async function resetConfig() {
-            if (confirm('确定要重置配置为默认值吗？')) {
+            if (confirm('Are you sure you want to reset configuration to default values?')) {
                 try {
                     const response = await fetch('/api/config', { method: 'DELETE' });
                     if (response.ok) {
-                        alert('配置已重置！');
+                        alert('Configuration has been reset!');
                         loadConfig();
                     }
                 } catch (e) {
-                    alert('重置失败：' + e.message);
+                    alert('Reset failed: ' + e.message);
                 }
             }
         }
@@ -611,8 +611,8 @@ async function handleAdminInterface(request: Request): Promise<Response> {
                         <td>\${info.name}</td>
                         <td><code>\${key}</code></td>
                         <td>\${new Date(info.created).toLocaleString()}</td>
-                        <td>\${info.active ? '✅ 活跃' : '❌ 禁用'}</td>
-                        <td><button class="btn btn-danger" onclick="deleteAPIKey('\${key}')">删除</button></td>
+                        <td>\${info.active ? '✅ Active' : '❌ Disabled'}</td>
+                        <td><button class="btn btn-danger" onclick="deleteAPIKey('\${key}')">Delete</button></td>
                     </tr>
                 \`).join('');
             } catch (e) {
@@ -623,7 +623,7 @@ async function handleAdminInterface(request: Request): Promise<Response> {
         async function createAPIKey() {
             const name = document.getElementById('newKeyName').value.trim();
             if (!name) {
-                alert('请输入密钥名称');
+                alert('Please enter a key name');
                 return;
             }
             
@@ -635,19 +635,19 @@ async function handleAdminInterface(request: Request): Promise<Response> {
                 });
                 const result = await response.json();
                 if (response.ok) {
-                    alert(\`API密钥创建成功！\\n密钥：\${result.apiKey}\`);
+                    alert(\`API key created successfully!\\nKey: \${result.apiKey}\`);
                     document.getElementById('newKeyName').value = '';
                     loadAPIKeys();
                 } else {
-                    alert('创建失败：' + result.message);
+                    alert('Creation failed: ' + result.message);
                 }
             } catch (e) {
-                alert('创建失败：' + e.message);
+                alert('Creation failed: ' + e.message);
             }
         }
 
         async function deleteAPIKey(apiKey) {
-            if (confirm('确定要删除这个API密钥吗？')) {
+            if (confirm('Are you sure you want to delete this API key?')) {
                 try {
                     const response = await fetch('/api/apikeys', {
                         method: 'DELETE',
@@ -655,11 +655,11 @@ async function handleAdminInterface(request: Request): Promise<Response> {
                         body: JSON.stringify({ apiKey })
                     });
                     if (response.ok) {
-                        alert('API密钥已删除！');
+                        alert('API key deleted!');
                         loadAPIKeys();
                     }
                 } catch (e) {
-                    alert('删除失败：' + e.message);
+                    alert('Deletion failed: ' + e.message);
                 }
             }
         }
@@ -694,11 +694,11 @@ async function handleAdminInterface(request: Request): Promise<Response> {
  */
 async function handleHomePage(request: Request): Promise<Response> {
   const homeHTML = `<!DOCTYPE html>
-<html lang="zh-CN">
+<html lang="en">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>CIAO-CORS - 免费CORS代理服务</title>
+    <title>CIAO-CORS - Free CORS Proxy Service</title>
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
         body { 
@@ -729,65 +729,65 @@ async function handleHomePage(request: Request): Promise<Response> {
     <div class="container">
         <div class="header">
             <h1>🌐 CIAO-CORS</h1>
-            <p>免费、快速、安全的 CORS 代理服务</p>
-            <p>解决跨域问题，让API调用变得简单</p>
+            <p>Free, Fast, and Secure CORS Proxy Service</p>
+            <p>Solve cross-origin issues and make API calls simple</p>
         </div>
 
         <div class="features">
             <div class="feature">
-                <h3>🚀 快速简单</h3>
-                <p>只需在URL前添加代理地址，即可解决跨域问题。无需注册，立即使用。</p>
+                <h3>🚀 Quick & Simple</h3>
+                <p>Just add the proxy address in front of your URL to solve CORS issues. No registration required, use immediately.</p>
             </div>
             <div class="feature">
-                <h3>🔒 安全可靠</h3>
-                <p>支持IP白名单、API密钥认证、频率限制等安全措施，保护您的服务。</p>
+                <h3>🔒 Safe & Reliable</h3>
+                <p>Supports IP whitelist, API key authentication, rate limiting and other security measures to protect your service.</p>
             </div>
             <div class="feature">
-                <h3>📊 监控统计</h3>
-                <p>完整的请求日志和统计数据，让您了解服务使用情况。</p>
+                <h3>📊 Monitoring & Stats</h3>
+                <p>Complete request logs and statistical data to help you understand service usage.</p>
             </div>
             <div class="feature">
-                <h3>⚙️ 灵活配置</h3>
-                <p>支持黑白名单、频率限制、并发控制等多种配置选项。</p>
+                <h3>⚙️ Flexible Configuration</h3>
+                <p>Supports blacklist/whitelist, rate limiting, concurrent control and other configuration options.</p>
             </div>
         </div>
 
         <div class="usage">
-            <h2>📖 使用说明</h2>
-            <h3>基本用法</h3>
-            <p>在您要请求的URL前面加上代理地址：</p>
+            <h2>📖 Usage Guide</h2>
+            <h3>Basic Usage</h3>
+            <p>Add the proxy address in front of the URL you want to request:</p>
             <div class="code">
                 https://your-proxy.deno.dev/https://api.example.com/data
             </div>
             
-            <h3>JavaScript 示例</h3>
+            <h3>JavaScript Example</h3>
             <div class="code">
-// 原始请求（会有跨域问题）
+// Original request (will have CORS issues)
 fetch('https://api.example.com/data')
 
-// 使用代理（解决跨域）
+// Using proxy (solves CORS)
 fetch('https://your-proxy.deno.dev/https://api.example.com/data')
             </div>
 
-            <h3>使用 API Key（可选）</h3>
+            <h3>Using API Key (Optional)</h3>
             <div class="code">
-// 通过请求头
+// Via request header
 fetch('https://your-proxy.deno.dev/https://api.example.com/data', {
   headers: { 'X-API-Key': 'your-api-key' }
 })
 
-// 通过URL参数
+// Via URL parameter
 fetch('https://your-proxy.deno.dev/https://api.example.com/data?key=your-api-key')
             </div>
         </div>
 
         <div style="text-align: center;">
-            <a href="/admin" class="admin-btn">🔧 管理界面</a>
+            <a href="/admin" class="admin-btn">🔧 Admin Dashboard</a>
         </div>
 
         <div class="footer">
-            <p>CIAO-CORS © 2025 | 基于 Deno Deploy 构建</p>
-            <p>开源项目，欢迎贡献代码</p>
+            <p>CIAO-CORS © 2025 | Built on Deno Deploy</p>
+            <p>Open source project, contributions welcome</p>
         </div>
     </div>
 </body>
@@ -807,11 +807,11 @@ fetch('https://your-proxy.deno.dev/https://api.example.com/data?key=your-api-key
  */
 async function handleLoginPage(request: Request): Promise<Response> {
   const loginHTML = `<!DOCTYPE html>
-<html lang="zh-CN">
+<html lang="en">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>CIAO-CORS - 管理员登录</title>
+    <title>CIAO-CORS - Admin Login</title>
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
         body { 
@@ -856,8 +856,8 @@ async function handleLoginPage(request: Request): Promise<Response> {
 <body>
     <div class="login-container">
         <div class="login-header">
-            <h1>🔐 管理员登录</h1>
-            <p>输入管理员密码访问管理界面</p>
+            <h1>🔐 Admin Login</h1>
+            <p>Enter admin password to access management interface</p>
         </div>
         
         <div id="error" class="error"></div>
@@ -865,13 +865,13 @@ async function handleLoginPage(request: Request): Promise<Response> {
         
         <form id="loginForm" onsubmit="handleLogin(event)">
             <div class="form-group">
-                <label for="password">管理员密码</label>
-                <input type="password" id="password" name="password" required placeholder="请输入管理员密码">
+                <label for="password">Admin Password</label>
+                <input type="password" id="password" name="password" required placeholder="Please enter admin password">
             </div>
-            <button type="submit" class="btn">登录</button>
+            <button type="submit" class="btn">Login</button>
         </form>
         
-        <a href="/" class="back-link">← 返回首页</a>
+        <a href="/" class="back-link">← Back to Home</a>
     </div>
 
     <script>
@@ -895,18 +895,18 @@ async function handleLoginPage(request: Request): Promise<Response> {
                 const result = await response.json();
                 
                 if (response.ok && result.success) {
-                    successDiv.textContent = '登录成功，正在跳转...';
+                    successDiv.textContent = 'Login successful, redirecting...';
                     successDiv.style.display = 'block';
                     setTimeout(() => {
                         window.location.href = '/admin';
                     }, 1000);
                 } else {
-                    errorDiv.textContent = '密码错误，请重试';
+                    errorDiv.textContent = 'Incorrect password, please try again';
                     errorDiv.style.display = 'block';
                     document.getElementById('password').value = '';
                 }
             } catch (error) {
-                errorDiv.textContent = '登录失败：' + error.message;
+                errorDiv.textContent = 'Login failed: ' + error.message;
                 errorDiv.style.display = 'block';
             }
         }
