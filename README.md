@@ -502,7 +502,7 @@ deno lint server.ts
 ### 联系方式
 
 - GitHub Issues: [https://github.com/bestZwei/ciao-cors/issues](https://github.com/bestZwei/ciao-cors/issues)
-- Email: [your-email@example.com](mailto:your-email@example.com)
+- Email: [post@zwei.de.eu.org](mailto:post@zwei.de.eu.org
 
 ---
 
