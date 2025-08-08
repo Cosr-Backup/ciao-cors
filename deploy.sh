@@ -403,18 +403,60 @@ install_deno() {
 
   # 尝试使用官方安装脚本
   print_status "info" "使用官方安装脚本..."
-  if timeout 300 bash -c "curl -fsSL https://deno.land/x/install/install.sh | DENO_INSTALL='$deno_install_dir' sh" 2>/dev/null; then
+  print_status "info" "正在下载和安装Deno，这可能需要几分钟时间，请耐心等待..."
+
+  # 创建临时文件来监控进度
+  local progress_file=$(mktemp)
+  local install_log=$(mktemp)
+
+  # 在后台运行安装脚本并监控进度
+  (
+    timeout 300 bash -c "curl -fsSL https://deno.land/x/install/install.sh | DENO_INSTALL='$deno_install_dir' sh" > "$install_log" 2>&1
+    echo $? > "$progress_file"
+  ) &
+
+  local install_pid=$!
+  local dots=0
+
+  # 显示进度点
+  while kill -0 $install_pid 2>/dev/null; do
+    sleep 5
+    dots=$((dots + 1))
+    case $((dots % 4)) in
+      1) echo -n "." ;;
+      2) echo -n ".." ;;
+      3) echo -n "..." ;;
+      0) echo -ne "\r正在安装Deno    \r正在安装Deno" ;;
+    esac
+  done
+
+  wait $install_pid
+  local exit_code=$(cat "$progress_file" 2>/dev/null || echo "1")
+
+  echo  # 换行
+
+  if [[ "$exit_code" -eq 0 ]]; then
     print_status "success" "官方安装脚本执行成功"
+    rm -f "$progress_file" "$install_log"
   else
     print_status "warning" "官方安装脚本失败，尝试手动安装..."
+    # 显示错误日志（如果有的话）
+    if [[ -s "$install_log" ]]; then
+      print_status "debug" "安装日志: $(tail -3 "$install_log" | tr '\n' ' ')"
+    fi
+    rm -f "$progress_file" "$install_log"
 
     # 手动下载安装
     local download_url="https://github.com/denoland/deno/releases/latest/download/deno-${deno_arch}.zip"
     local temp_file=$(mktemp --suffix=.zip)
 
     print_status "info" "下载Deno二进制文件..."
-    if timeout 300 curl -fsSL --connect-timeout 30 --max-time 180 --retry 3 --retry-delay 10 \
-       "$download_url" -o "$temp_file" 2>/dev/null; then
+    print_status "info" "下载地址: $download_url"
+    print_status "info" "正在下载，请稍候..."
+
+    # 使用curl显示进度
+    if timeout 300 curl -L --connect-timeout 30 --max-time 180 --retry 3 --retry-delay 10 \
+       --progress-bar "$download_url" -o "$temp_file" 2>/dev/null; then
       print_status "success" "下载完成"
 
       # 验证下载的文件
