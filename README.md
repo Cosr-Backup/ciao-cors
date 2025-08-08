@@ -1,125 +1,290 @@
 # CIAO-CORS
 
-![CIAO-CORS Logo](https://via.placeholder.com/200x80/3498db/ffffff?text=CIAO-CORS)
+高性能、功能完整的CORS代理服务，支持多种部署方式和丰富的配置选项。
 
-CIAO-CORS (Comprehensive CORS Proxy with Web Management Interface) is a complete CORS proxy solution with frontend UI, authentication, and advanced management features. It's designed for easy deployment on local servers or platforms like Deno Deploy.
+## 功能特性
 
-## Features
+### 核心功能
+- 🚀 **高性能CORS代理**：支持所有HTTP方法和内容类型
+- 🔒 **安全防护**：IP/域名黑白名单、恶意URL检测
+- ⚡ **智能限流**：请求频率限制和并发控制
+- 📊 **实时监控**：请求统计、性能分析、状态监控
+- 🎯 **智能缓存**：GET请求响应缓存，提升性能
+- 📝 **完整日志**：控制台和Webhook日志支持
 
-- 🌐 **Full CORS Proxy**: Eliminates cross-origin issues for API requests
-- 🔒 **Security Controls**: IP filtering, origin restrictions, and API key authentication
-- 📊 **Monitoring Dashboard**: Track usage statistics and request logs
-- ⚙️ **Customizable Settings**: Configure rate limits, blacklists, whitelists, and more
-- 🚀 **Easy Deployment**: One-click deployment scripts for various platforms
-- 💻 **Web Management Interface**: Administer your proxy through a user-friendly web UI
+### 配置选项
+- **黑白名单**：支持IP和域名级别的访问控制
+- **频率限制**：可配置的滑动窗口请求限制
+- **并发控制**：单IP和全局并发数限制
+- **统计监控**：可选的请求统计和性能监控
+- **API管理**：内置管理API，支持API密钥保护
 
-## Quick Start
+### 部署方式
+- **Deno Deploy**：一键部署到全球CDN网络
+- **VPS部署**：完整的一键安装和管理脚本
+- **Docker容器**：支持容器化部署
 
-### Option 1: One-Click Deployment (Recommended)
+## 快速开始
 
-#### Linux/macOS
+### Deno Deploy部署
 
-```bash
-# Download and run the deployment script
-curl -fsSL https://raw.githubusercontent.com/bestZwei/ciao-cors/main/deploy.sh -o deploy.sh
-chmod +x deploy.sh
-./deploy.sh
-```
-
-#### Windows
-
-```powershell
-# Download and run the deployment script
-Invoke-WebRequest -Uri https://raw.githubusercontent.com/bestZwei/ciao-cors/main/deploy.ps1 -OutFile deploy.ps1
-.\deploy.ps1
-```
-
-### Option 2: Manual Deployment
-
-1. Ensure [Deno](https://deno.land/) is installed
-2. Clone the repository
-
+1. **克隆项目**
    ```bash
    git clone https://github.com/bestZwei/ciao-cors.git
    cd ciao-cors
    ```
 
-3. Run the server
-
+2. **登录Deno Deploy**
    ```bash
-   PORT=8038 ADMIN_PASSWORD=your_secure_password deno run --allow-net --allow-env --allow-read main.ts
+   deno task deploy
    ```
 
-4. Access the web interface at [http://localhost:8038](http://localhost:8038)
+3. **配置环境变量**
+   在Deno Deploy控制台中设置环境变量（可选）
 
-### Option 3: Deploy to Deno Deploy
+### VPS部署
 
-1. Fork the repository
-2. Log in to [Deno Deploy](https://dash.deno.com/)
-3. Create a new project and connect to your GitHub repository
-4. Set the entry point to `main.ts`
-5. Deploy and enjoy your CORS proxy service!
+1. **下载部署脚本**
+   ```bash
+   curl -fsSL https://raw.githubusercontent.com/bestZwei/ciao-cors/main/deploy.sh -o deploy.sh
+   chmod +x deploy.sh
+   ```
 
-## Usage Examples
+2. **运行安装脚本**
+   ```bash
+   sudo ./deploy.sh
+   ```
 
-### Basic CORS Proxy
+3. **按照菜单提示操作**
+   - 自动检测和安装Deno
+   - 配置服务参数
+   - 设置防火墙规则
+   - 创建系统服务
 
-To make a request through the proxy:
+## 配置说明
 
-```javascript
-// Original request (with CORS issues)
-fetch('https://api.example.com/data')
+### 环境变量
 
-// Using CIAO-CORS proxy
-fetch('https://your-ciao-cors.deno.dev/https://api.example.com/data')
+| 变量名 | 默认值 | 说明 |
+|--------|--------|------|
+| `PORT` | `3000` | 服务监听端口 |
+| `RATE_LIMIT` | `60` | 每个时间窗口的最大请求数 |
+| `RATE_LIMIT_WINDOW` | `60000` | 限流时间窗口（毫秒） |
+| `CONCURRENT_LIMIT` | `10` | 单IP最大并发数 |
+| `TOTAL_CONCURRENT_LIMIT` | `1000` | 全局最大并发数 |
+| `MAX_URL_LENGTH` | `2048` | 最大URL长度 |
+| `TIMEOUT` | `30000` | 请求超时时间（毫秒） |
+| `ENABLE_STATS` | `false` | 是否启用统计功能 |
+| `ENABLE_LOGGING` | `true` | 是否启用日志记录 |
+| `API_KEY` | - | 管理API密钥（可选） |
+| `LOG_WEBHOOK` | - | 日志Webhook URL（可选） |
+| `ALLOWED_ORIGINS` | - | 允许的来源域名列表（JSON或逗号分隔） |
+| `BLOCKED_IPS` | - | 禁止的IP地址列表（JSON或逗号分隔） |
+| `BLOCKED_DOMAINS` | - | 禁止的域名列表（JSON或逗号分隔） |
+| `ALLOWED_DOMAINS` | - | 允许的域名列表（JSON或逗号分隔） |
+
+### 配置示例
+
+**基础配置**
+```bash
+export PORT=3000
+export RATE_LIMIT=100
+export ENABLE_STATS=true
+export API_KEY=your-secret-key
 ```
 
-### Using API Keys
-
-For enhanced security, you can create API keys in the admin interface and use them:
-
-```javascript
-// Using API key in header
-fetch('https://your-ciao-cors.deno.dev/https://api.example.com/data', {
-  headers: { 'X-API-Key': 'your-api-key' }
-})
-
-// Or as a URL parameter
-fetch('https://your-ciao-cors.deno.dev/https://api.example.com/data?key=your-api-key')
+**安全配置**
+```bash
+export BLOCKED_IPS='["192.168.1.100", "10.0.0.5"]'
+export ALLOWED_DOMAINS='["api.example.com", "data.example.org"]'
+export BLOCKED_DOMAINS='["malicious.com", "spam.net"]'
 ```
 
-## Configuration Options
+**性能配置**
+```bash
+export CONCURRENT_LIMIT=20
+export TOTAL_CONCURRENT_LIMIT=2000
+export TIMEOUT=60000
+export RATE_LIMIT_WINDOW=30000
+```
 
-CIAO-CORS offers extensive configuration options through the web interface:
+## API说明
 
-- **Origins Control**: Allow or block specific origins
-- **IP Filtering**: Allow or block specific IP addresses
-- **Rate Limiting**: Set limits on requests per minute, concurrent requests, etc.
-- **Authentication**: Enable/disable API key requirements
-- **Monitoring**: View detailed logs and statistics
+### 代理使用
 
-All configurations can be managed through the admin dashboard at `/admin`
+**基本代理格式**
+```
+https://your-domain.com/{target-url}
+```
 
-## Architecture
+**使用示例**
+```bash
+# 代理GET请求
+curl https://your-domain.com/httpbin.org/get
 
-CIAO-CORS is built on Deno, a secure JavaScript/TypeScript runtime, making it lightweight and secure by default. The single-file architecture enables easy deployment on various platforms.
+# 代理POST请求
+curl -X POST https://your-domain.com/jsonplaceholder.typicode.com/posts \
+  -H "Content-Type: application/json" \
+  -d '{"title": "test", "body": "content"}'
 
-## Development
+# 代理带参数的请求
+curl "https://your-domain.com/api.github.com/users/octocat"
+```
 
-To contribute to CIAO-CORS:
+### 管理API
 
-1. Fork the repository
-2. Make your changes
-3. Test locally using `deno run --allow-net --allow-env --allow-read main.ts`
-4. Submit a pull request
+需要设置`API_KEY`环境变量才能访问管理API。
 
-## License
+**健康检查**
+```bash
+GET /_api/health?key=your-api-key
+```
 
-[MIT License](LICENSE)
+**查看统计信息**
+```bash
+GET /_api/stats?key=your-api-key
+```
 
-## Support
+**查看配置信息**
+```bash
+GET /_api/config?key=your-api-key
+```
 
-If you encounter any issues or have questions, please [open an issue](https://github.com/bestZwei/ciao-cors/issues) on GitHub.
+**重置统计数据**
+```bash
+GET /_api/reset-stats?key=your-api-key
+```
+
+**清理缓存**
+```bash
+GET /_api/clear-cache?key=your-api-key
+```
+
+**使用Bearer Token**
+```bash
+curl -H "Authorization: Bearer your-api-key" \
+  https://your-domain.com/_api/stats
+```
+
+## 本地开发
+
+### 运行开发服务器
+```bash
+deno run --allow-net --allow-env server.ts
+```
+
+### 类型检查
+```bash
+deno check server.ts
+```
+
+### 格式化代码
+```bash
+deno fmt server.ts
+```
+
+### Lint检查
+```bash
+deno lint server.ts
+```
+
+## 故障排除
+
+### 常见问题
+
+**Q: 服务启动失败，提示端口被占用**
+```bash
+# 检查端口占用
+sudo netstat -tlnp | grep :3000
+# 或使用其他端口
+export PORT=8080
+```
+
+**Q: 请求被拒绝，提示Rate limit exceeded**
+```bash
+# 调整限流配置
+export RATE_LIMIT=200
+export RATE_LIMIT_WINDOW=60000
+```
+
+**Q: 代理请求超时**
+```bash
+# 增加超时时间
+export TIMEOUT=60000
+```
+
+**Q: 统计数据不显示**
+```bash
+# 启用统计功能
+export ENABLE_STATS=true
+```
+
+### 调试技巧
+
+**查看实时日志**
+```bash
+# systemd服务日志
+sudo journalctl -f -u ciao-cors
+
+# 或者直接运行
+deno run --allow-net --allow-env server.ts
+```
+
+**测试配置**
+```bash
+# 健康检查
+curl http://localhost:3000/_api/health
+
+# 测试代理
+curl http://localhost:3000/httpbin.org/ip
+```
+
+## 性能优化
+
+### 推荐配置
+- **小型站点**：并发限制10，频率限制60/分钟
+- **中型站点**：并发限制50，频率限制300/分钟
+- **大型站点**：并发限制100，频率限制1000/分钟
+
+### 监控指标
+- 平均响应时间
+- 错误率
+- 并发连接数
+- 缓存命中率
+
+## 更新日志
+
+### v1.1.0 (2024-01-XX)
+- ✨ 新增响应缓存功能
+- ✨ 新增小时统计数据
+- ✨ 新增批量日志发送
+- 🐛 修复TypeScript类型错误
+- ⚡ 优化内存使用和性能
+
+### v1.0.0 (2024-01-XX)
+- 🎉 首次发布
+- ✨ 基础CORS代理功能
+- ✨ 限流和安全控制
+- ✨ 统计和监控功能
+- ✨ 管理API接口
+
+## 许可证
+
+MIT License - 详见 [LICENSE](LICENSE) 文件
+
+## 贡献
+
+欢迎提交Issue和Pull Request！
+
+1. Fork本项目
+2. 创建功能分支 (`git checkout -b feature/AmazingFeature`)
+3. 提交更改 (`git commit -m 'Add some AmazingFeature'`)
+4. 推送到分支 (`git push origin feature/AmazingFeature`)
+5. 开启Pull Request
+
+## 支持
+
+如果这个项目对你有帮助，请给个⭐️！
 
 ---
 
