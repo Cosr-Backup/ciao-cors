@@ -39,6 +39,63 @@ EXIT_SERVICE_ERROR=5
 
 # ==================== 基础功能函数 ====================
 
+# 安全检查函数
+security_check() {
+    print_status "info" "执行安全检查..."
+
+    # 检查是否在容器中运行
+    if [[ -f /.dockerenv ]] || grep -q docker /proc/1/cgroup 2>/dev/null; then
+        print_status "warning" "检测到容器环境，某些安全功能可能受限"
+    fi
+
+    # 检查SELinux状态
+    if command -v getenforce &> /dev/null; then
+        local selinux_status=$(getenforce 2>/dev/null)
+        if [[ "$selinux_status" == "Enforcing" ]]; then
+            print_status "info" "SELinux已启用 (Enforcing模式)"
+        elif [[ "$selinux_status" == "Permissive" ]]; then
+            print_status "warning" "SELinux处于Permissive模式"
+        else
+            print_status "info" "SELinux已禁用"
+        fi
+    fi
+
+    # 检查AppArmor状态
+    if command -v aa-status &> /dev/null; then
+        if aa-status --enabled 2>/dev/null; then
+            print_status "info" "AppArmor已启用"
+        else
+            print_status "info" "AppArmor未启用"
+        fi
+    fi
+
+    # 检查系统更新状态
+    local updates_available=false
+    if command -v apt &> /dev/null; then
+        if apt list --upgradable 2>/dev/null | grep -q upgradable; then
+            updates_available=true
+        fi
+    elif command -v yum &> /dev/null; then
+        if yum check-update &>/dev/null; then
+            updates_available=true
+        fi
+    fi
+
+    if [[ "$updates_available" == "true" ]]; then
+        print_status "warning" "系统有可用更新，建议先更新系统"
+        read -p "是否现在更新系统? (y/N): " update_system
+        if [[ "$update_system" =~ ^[Yy]$ ]]; then
+            if command -v apt &> /dev/null; then
+                apt update && apt upgrade -y
+            elif command -v yum &> /dev/null; then
+                yum update -y
+            fi
+        fi
+    fi
+
+    print_status "success" "安全检查完成"
+}
+
 # 显示彩色输出
 print_status() {
     local type=$1
@@ -346,7 +403,7 @@ install_deno() {
 
   # 尝试使用官方安装脚本
   print_status "info" "使用官方安装脚本..."
-  if curl -fsSL https://deno.land/x/install/install.sh | DENO_INSTALL="$deno_install_dir" sh; then
+  if timeout 300 bash -c "curl -fsSL https://deno.land/x/install/install.sh | DENO_INSTALL='$deno_install_dir' sh" 2>/dev/null; then
     print_status "success" "官方安装脚本执行成功"
   else
     print_status "warning" "官方安装脚本失败，尝试手动安装..."
@@ -356,12 +413,21 @@ install_deno() {
     local temp_file=$(mktemp --suffix=.zip)
 
     print_status "info" "下载Deno二进制文件..."
-    if curl -fsSL "$download_url" -o "$temp_file"; then
+    if timeout 300 curl -fsSL --connect-timeout 30 --max-time 180 --retry 3 --retry-delay 10 \
+       "$download_url" -o "$temp_file" 2>/dev/null; then
       print_status "success" "下载完成"
 
       # 验证下载的文件
       if [[ ! -s "$temp_file" ]]; then
         print_status "error" "下载的文件为空"
+        rm -f "$temp_file"
+        return $EXIT_NETWORK_ERROR
+      fi
+
+      # 检查文件大小是否合理（Deno二进制文件通常大于10MB）
+      local file_size=$(stat -c%s "$temp_file" 2>/dev/null || wc -c < "$temp_file")
+      if [[ $file_size -lt 10485760 ]]; then  # 小于10MB
+        print_status "error" "下载的文件大小异常 (${file_size} bytes)"
         rm -f "$temp_file"
         return $EXIT_NETWORK_ERROR
       fi
@@ -436,35 +502,111 @@ download_project() {
         return $EXIT_GENERAL_ERROR
     }
 
-    # 下载主文件，增加重试机制
+    # 下载主文件，增加重试机制和安全验证
     local max_retries=3
     local retry_count=0
+    local expected_min_size=10240  # 最小10KB
+    local expected_max_size=2097152  # 最大2MB
 
     while [[ $retry_count -lt $max_retries ]]; do
         print_status "info" "尝试下载项目文件 (第 $((retry_count + 1)) 次)..."
 
-        if curl -fsSL --connect-timeout 30 --max-time 120 "$GITHUB_REPO/server.ts" -o server.ts.tmp; then
+        # 增加更严格的安全检查和错误处理
+        if timeout 180 curl -fsSL --connect-timeout 30 --max-time 120 --retry 2 --retry-delay 5 \
+           --user-agent "CIAO-CORS-Deploy/1.2.5" --fail --location \
+           "$GITHUB_REPO/server.ts" -o server.ts.tmp 2>/dev/null; then
             # 验证下载的文件
             if [[ -s server.ts.tmp ]]; then
-                # 检查文件头部是否包含预期的注释
-                if head -5 server.ts.tmp | grep -q "CIAO-CORS"; then
-                    # 检查文件大小是否合理 (应该大于10KB小于1MB)
-                    local file_size=$(stat -c%s server.ts.tmp 2>/dev/null || wc -c < server.ts.tmp)
-                    if [[ $file_size -gt 10240 ]] && [[ $file_size -lt 1048576 ]]; then
-                        # 检查是否包含关键函数
-                        if grep -q "class CiaoCorsServer" server.ts.tmp && grep -q "export default" server.ts.tmp; then
-                            mv server.ts.tmp server.ts
-                            chmod +x server.ts
-                            print_status "success" "项目文件下载成功"
-                            return $EXIT_SUCCESS
+                # 检查文件大小是否合理
+                local file_size=$(stat -c%s server.ts.tmp 2>/dev/null || wc -c < server.ts.tmp)
+                if [[ $file_size -gt $expected_min_size ]] && [[ $file_size -lt $expected_max_size ]]; then
+                    # 检查文件头部是否包含预期的注释
+                    if head -10 server.ts.tmp | grep -q "CIAO-CORS"; then
+                        # 检查是否包含关键函数和结构
+                        if grep -q "class CiaoCorsServer" server.ts.tmp && \
+                           grep -q "export default" server.ts.tmp && \
+                           grep -q "handleRequest" server.ts.tmp && \
+                           grep -q "validateRequest" server.ts.tmp; then
+                            # 检查是否包含恶意代码模式（更精确的检测）
+                            local malicious_patterns=(
+                                # 直接执行代码的危险模式
+                                "eval\s*\(\s*[\"'][^\"']*[\"']\s*\)"
+                                "Function\s*\(\s*[\"'][^\"']*[\"']\s*\)"
+                                "setTimeout\s*\(\s*[\"'][^\"']*eval"
+                                "setInterval\s*\(\s*[\"'][^\"']*eval"
+                                # 浏览器DOM操作（服务器端不应该有）
+                                "document\s*\.\s*write\s*\("
+                                "\.innerHTML\s*=\s*[\"'][^\"']*<script"
+                                "\.outerHTML\s*=\s*[\"'][^\"']*<script"
+                                "execCommand\s*\("
+                                # 动态函数构造
+                                "new\s+Function\s*\(\s*[\"']"
+                                # 危险的with语句
+                                "with\s*\(\s*[^)]*\)\s*\{"
+                                # 原型污染攻击
+                                "__proto__\s*\[\s*[\"'][^\"']*[\"']\s*\]\s*="
+                                "constructor\s*\[\s*[\"']prototype[\"']\s*\]"
+                                # 明显的恶意代码特征
+                                "rm\s+-rf\s+/"
+                                "curl\s+.*\|\s*sh"
+                                "wget\s+.*\|\s*sh"
+                                "base64\s+-d.*\|\s*sh"
+                                # 网络请求到可疑域名
+                                "fetch\s*\(\s*[\"']https?://[^/]*\.tk/"
+                                "fetch\s*\(\s*[\"']https?://[^/]*\.ml/"
+                            )
+
+                            local has_malicious=false
+                            local detected_pattern=""
+                            for pattern in "${malicious_patterns[@]}"; do
+                                if grep -qE "$pattern" server.ts.tmp; then
+                                    detected_pattern="$pattern"
+                                    has_malicious=true
+                                    break
+                                fi
+                            done
+
+                            # 额外检查：文件中不应该包含的明显恶意字符串
+                            local malicious_strings=(
+                                "backdoor"
+                                "keylogger"
+                                "trojan"
+                                "malware"
+                                "exploit"
+                                "shellcode"
+                                "reverse_shell"
+                                "bind_shell"
+                            )
+
+                            if [[ "$has_malicious" == "false" ]]; then
+                                for malicious_str in "${malicious_strings[@]}"; do
+                                    if grep -qi "$malicious_str" server.ts.tmp; then
+                                        detected_pattern="suspicious string: $malicious_str"
+                                        has_malicious=true
+                                        break
+                                    fi
+                                done
+                            fi
+
+                            if [[ "$has_malicious" == "false" ]]; then
+                                mv server.ts.tmp server.ts
+                                chmod +x server.ts
+                                print_status "success" "项目文件下载成功 (${file_size} bytes)"
+                                return $EXIT_SUCCESS
+                            else
+                                print_status "error" "下载的文件包含可疑代码模式: $detected_pattern"
+                                print_status "warning" "为安全起见，拒绝安装此文件"
+                                rm -f server.ts.tmp
+                                return $EXIT_NETWORK_ERROR
+                            fi
                         else
                             print_status "warning" "下载的文件缺少关键组件，重试..."
                         fi
                     else
-                        print_status "warning" "下载的文件大小异常 (${file_size} bytes)，重试..."
+                        print_status "warning" "下载的文件格式不正确，重试..."
                     fi
                 else
-                    print_status "warning" "下载的文件格式不正确，重试..."
+                    print_status "warning" "下载的文件大小异常 (${file_size} bytes，期望: ${expected_min_size}-${expected_max_size})，重试..."
                 fi
                 rm -f server.ts.tmp
             else
@@ -524,15 +666,47 @@ validate_json_array() {
 
     # 使用python或node.js验证JSON格式
     if command -v python3 &> /dev/null; then
-        echo "$json_str" | python3 -c "import sys,json; json.load(sys.stdin)" 2>/dev/null
-        if [[ $? -ne 0 ]]; then
-            print_status "warning" "$name JSON格式无效: $json_str"
+        local validation_result=$(echo "$json_str" | python3 -c "
+import sys, json
+try:
+    data = json.load(sys.stdin)
+    if not isinstance(data, list):
+        print('ERROR: Not an array')
+        sys.exit(1)
+    if not all(isinstance(item, str) for item in data):
+        print('ERROR: Array contains non-string items')
+        sys.exit(1)
+    print('OK')
+except Exception as e:
+    print(f'ERROR: {e}')
+    sys.exit(1)
+" 2>&1)
+
+        if [[ "$validation_result" != "OK" ]]; then
+            print_status "warning" "$name JSON格式无效: $validation_result"
             return 1
         fi
     elif command -v node &> /dev/null; then
-        echo "$json_str" | node -e "JSON.parse(require('fs').readFileSync(0, 'utf8'))" 2>/dev/null
-        if [[ $? -ne 0 ]]; then
-            print_status "warning" "$name JSON格式无效: $json_str"
+        local validation_result=$(echo "$json_str" | node -e "
+try {
+    const data = JSON.parse(require('fs').readFileSync(0, 'utf8'));
+    if (!Array.isArray(data)) {
+        console.log('ERROR: Not an array');
+        process.exit(1);
+    }
+    if (!data.every(item => typeof item === 'string')) {
+        console.log('ERROR: Array contains non-string items');
+        process.exit(1);
+    }
+    console.log('OK');
+} catch (e) {
+    console.log('ERROR: ' + e.message);
+    process.exit(1);
+}
+" 2>&1)
+
+        if [[ "$validation_result" != "OK" ]]; then
+            print_status "warning" "$name JSON格式无效: $validation_result"
             return 1
         fi
     fi
@@ -777,7 +951,13 @@ create_config() {
                 IFS='.' read -ra ADDR <<< "$ip"
                 local valid=true
                 for octet in "${ADDR[@]}"; do
-                    if [[ $octet -lt 0 ]] || [[ $octet -gt 255 ]]; then
+                    # 增加更严格的数字验证
+                    if ! [[ "$octet" =~ ^[0-9]+$ ]] || [[ $octet -lt 0 ]] || [[ $octet -gt 255 ]] || [[ ${#octet} -gt 3 ]]; then
+                        valid=false
+                        break
+                    fi
+                    # 检查前导零（除了单独的0）
+                    if [[ ${#octet} -gt 1 ]] && [[ "$octet" =~ ^0 ]]; then
                         valid=false
                         break
                     fi
@@ -786,7 +966,12 @@ create_config() {
                     invalid_ips="$invalid_ips $ip"
                 fi
             else
-                invalid_ips="$invalid_ips $ip"
+                # 检查是否为IPv6地址（简单验证）
+                if [[ "$ip" =~ ^[0-9a-fA-F:]+$ ]] && [[ "$ip" =~ : ]]; then
+                    print_status "info" "检测到IPv6地址: $ip"
+                else
+                    invalid_ips="$invalid_ips $ip"
+                fi
             fi
         done
         if [[ -n "$invalid_ips" ]]; then
@@ -884,11 +1069,31 @@ EOF
     chmod 600 "$CONFIG_FILE"
     chown root:root "$CONFIG_FILE" 2>/dev/null || true
 
-    # 验证配置文件
+    # 验证配置文件内容
     if [[ -f "$CONFIG_FILE" ]] && [[ -s "$CONFIG_FILE" ]]; then
-        print_status "success" "配置文件创建成功: $CONFIG_FILE"
-        print_status "info" "配置文件权限: $(ls -l "$CONFIG_FILE" | awk '{print $1, $3, $4}')"
-        return $EXIT_SUCCESS
+        # 检查配置文件是否包含必要的配置项
+        if grep -q "^PORT=" "$CONFIG_FILE"; then
+            # 验证配置文件语法
+            if bash -n <(grep -E '^[A-Z_]+=.*$' "$CONFIG_FILE" | sed 's/^/export /'); then
+                print_status "success" "配置文件创建成功: $CONFIG_FILE"
+                print_status "info" "配置文件权限: $(ls -l "$CONFIG_FILE" | awk '{print $1, $3, $4}')"
+
+                # 创建配置文件的安全备份
+                local secure_backup="$BACKUP_DIR/config.env.secure.$(date +%Y%m%d_%H%M%S)"
+                mkdir -p "$BACKUP_DIR"
+                cp "$CONFIG_FILE" "$secure_backup"
+                chmod 600 "$secure_backup"
+                print_status "info" "安全备份已创建: $secure_backup"
+
+                return $EXIT_SUCCESS
+            else
+                print_status "error" "配置文件语法错误"
+                return $EXIT_CONFIG_ERROR
+            fi
+        else
+            print_status "error" "配置文件缺少必要配置项"
+            return $EXIT_CONFIG_ERROR
+        fi
     else
         print_status "error" "配置文件创建失败"
         return $EXIT_CONFIG_ERROR
@@ -1061,15 +1266,22 @@ ProtectHome=true
 ProtectKernelTunables=true
 ProtectKernelModules=true
 ProtectControlGroups=true
+ProtectKernelLogs=true
+ProtectClock=true
 ReadWritePaths=$INSTALL_DIR
 ReadWritePaths=/var/log
 ReadWritePaths=/tmp
 PrivateTmp=true
 PrivateDevices=true
+PrivateUsers=false
 MemoryDenyWriteExecute=false
 RestrictRealtime=true
 RestrictSUIDSGID=true
+RestrictNamespaces=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
 LockPersonality=true
+SystemCallFilter=@system-service
+SystemCallFilter=~@debug @mount @cpu-emulation @obsolete @privileged @reboot @swap
 
 # 资源限制
 LimitNOFILE=65536
@@ -1517,8 +1729,17 @@ modify_api_key() {
 
         if [[ -n "$port" ]] && [[ -n "$api_key" ]]; then
             print_status "info" "尝试热重载配置..."
-            local reload_response=$(curl -s --connect-timeout 5 --max-time 10 "http://localhost:$port/_api/reload-config?key=$api_key" 2>/dev/null)
-            local curl_exit_code=$?
+            # 增加更严格的超时和错误处理
+            local reload_response=""
+            local curl_exit_code=1
+
+            # 使用timeout确保不会无限等待
+            if reload_response=$(timeout 15 curl -s --connect-timeout 5 --max-time 10 --retry 1 \
+                "http://localhost:$port/_api/reload-config?key=$api_key" 2>/dev/null); then
+                curl_exit_code=0
+            else
+                curl_exit_code=$?
+            fi
 
             if [[ $curl_exit_code -eq 0 ]] && [[ -n "$reload_response" ]] && echo "$reload_response" | grep -q '"success":true'; then
                 print_status "success" "配置已热重载，无需重启服务"
@@ -1529,12 +1750,15 @@ modify_api_key() {
                 fi
                 return 0
             else
-                if [[ $curl_exit_code -ne 0 ]]; then
-                    print_status "warning" "热重载失败: 无法连接到服务 (curl exit code: $curl_exit_code)"
+                if [[ $curl_exit_code -eq 124 ]]; then
+                    print_status "warning" "热重载失败: 请求超时"
+                elif [[ $curl_exit_code -ne 0 ]]; then
+                    print_status "warning" "热重载失败: 无法连接到服务 (exit code: $curl_exit_code)"
                 elif [[ -z "$reload_response" ]]; then
                     print_status "warning" "热重载失败: 服务无响应"
                 else
-                    print_status "warning" "热重载失败: $(echo "$reload_response" | grep -o '"message":"[^"]*"' | cut -d'"' -f4 2>/dev/null || echo "未知错误")"
+                    local error_msg=$(echo "$reload_response" | grep -o '"message":"[^"]*"' | cut -d'"' -f4 2>/dev/null || echo "未知错误")
+                    print_status "warning" "热重载失败: $error_msg"
                 fi
                 print_status "info" "将尝试重启服务以应用配置"
             fi
@@ -2480,31 +2704,57 @@ check_script_update() {
     print_status "info" "检查脚本更新..."
 
     local remote_version=""
-    if remote_version=$(curl -s --connect-timeout 10 --max-time 30 "$GITHUB_REPO/deploy.sh" | grep "^SCRIPT_VERSION=" | head -1 | cut -d'"' -f2 2>/dev/null); then
-        if [[ -n "$remote_version" ]] && [[ "$remote_version" != "$SCRIPT_VERSION" ]]; then
-            print_status "warning" "发现新版本: $remote_version (当前: $SCRIPT_VERSION)"
-            read -p "是否更新脚本? (y/N): " update_script
-            if [[ "$update_script" =~ ^[Yy]$ ]]; then
-                print_status "info" "下载新版本脚本..."
-                local script_backup="$(dirname "$0")/deploy.sh.backup.$(date +%Y%m%d_%H%M%S)"
-                cp "$0" "$script_backup"
+    # 增加更严格的超时和错误处理
+    if remote_version=$(timeout 30 curl -s --connect-timeout 10 --max-time 25 --retry 2 --retry-delay 3 \
+        "$GITHUB_REPO/deploy.sh" 2>/dev/null | grep "^SCRIPT_VERSION=" | head -1 | cut -d'"' -f2 2>/dev/null); then
 
-                if curl -fsSL "$GITHUB_REPO/deploy.sh" -o "$0.new"; then
-                    chmod +x "$0.new"
-                    mv "$0.new" "$0"
-                    print_status "success" "脚本更新成功，请重新运行脚本"
-                    print_status "info" "旧版本已备份到: $script_backup"
-                    exit $EXIT_SUCCESS
-                else
-                    print_status "error" "脚本更新失败"
-                    rm -f "$0.new"
+        # 验证版本号格式
+        if [[ -n "$remote_version" ]] && [[ "$remote_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            if [[ "$remote_version" != "$SCRIPT_VERSION" ]]; then
+                print_status "warning" "发现新版本: $remote_version (当前: $SCRIPT_VERSION)"
+                read -p "是否更新脚本? (y/N): " update_script
+                if [[ "$update_script" =~ ^[Yy]$ ]]; then
+                    print_status "info" "下载新版本脚本..."
+                    local script_backup="$(dirname "$0")/deploy.sh.backup.$(date +%Y%m%d_%H%M%S)"
+
+                    # 确保备份目录存在且可写
+                    if ! cp "$0" "$script_backup" 2>/dev/null; then
+                        print_status "error" "无法创建备份文件"
+                        return $EXIT_GENERAL_ERROR
+                    fi
+
+                    # 下载新脚本到临时文件
+                    if timeout 60 curl -fsSL --connect-timeout 15 --max-time 45 --retry 2 \
+                       "$GITHUB_REPO/deploy.sh" -o "$0.new" 2>/dev/null; then
+
+                        # 验证下载的脚本
+                        if [[ -s "$0.new" ]] && head -1 "$0.new" | grep -q "^#!/bin/bash"; then
+                            chmod +x "$0.new"
+                            if mv "$0.new" "$0" 2>/dev/null; then
+                                print_status "success" "脚本更新成功，请重新运行脚本"
+                                print_status "info" "旧版本已备份到: $script_backup"
+                                exit $EXIT_SUCCESS
+                            else
+                                print_status "error" "无法替换脚本文件"
+                                rm -f "$0.new"
+                            fi
+                        else
+                            print_status "error" "下载的脚本文件无效"
+                            rm -f "$0.new"
+                        fi
+                    else
+                        print_status "error" "脚本更新失败"
+                        rm -f "$0.new"
+                    fi
                 fi
+            else
+                print_status "success" "脚本已是最新版本"
             fi
         else
-            print_status "success" "脚本已是最新版本"
+            print_status "warning" "远程版本号格式无效: $remote_version"
         fi
     else
-        print_status "warning" "无法检查脚本更新"
+        print_status "warning" "无法检查脚本更新，请检查网络连接"
     fi
 }
 
@@ -2732,6 +2982,7 @@ show_install_menu() {
     
     if [[ ! "$start_install" =~ ^[Nn]$ ]]; then
         # 执行安装步骤
+        security_check
         check_requirements || return 1
         
         if ! check_deno_installation; then

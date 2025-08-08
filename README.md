@@ -90,6 +90,7 @@
 | `CONCURRENT_LIMIT` | `10` | 单IP最大并发数 |
 | `TOTAL_CONCURRENT_LIMIT` | `1000` | 全局最大并发数 |
 | `MAX_URL_LENGTH` | `2048` | 最大URL长度 |
+| `MAX_BODY_SIZE` | `10485760` | 最大请求体大小（字节，默认10MB） |
 | `TIMEOUT` | `30000` | 请求超时时间（毫秒） |
 | `ENABLE_STATS` | `false` | 是否启用统计功能 |
 | `ENABLE_LOGGING` | `true` | 是否启用日志记录 |
@@ -200,25 +201,72 @@ curl -H "Authorization: Bearer your-api-key" \
 
 ## 安全最佳实践
 
-1. **始终设置API密钥**
-   - 保护管理API不被未授权访问
-   - 使用复杂的随机密钥
+### 🔐 基础安全配置
 
-2. **配置适当的限流**
-   - 根据应用需求和服务器资源调整限流参数
-   - 防止单个客户端消耗过多资源
+1. **强制设置API密钥**
+   - 使用至少32位的复杂随机密钥
+   - 包含大小写字母、数字和特殊字符
+   - 定期轮换API密钥（建议每3-6个月）
+   - 示例生成强密钥：`openssl rand -base64 32`
 
-3. **使用域名白名单**
-   - 限制只能代理受信任的域名
-   - 防止服务被滥用于访问恶意网站
+2. **配置严格的访问控制**
+   - 使用域名白名单限制可代理的目标
+   - 配置IP黑名单阻止恶意来源
+   - 设置来源白名单控制CORS访问
+   - 避免使用通配符（*）除非必要
 
-4. **启用统计和日志**
-   - 监控异常流量模式
-   - 设置日志Webhook收集到集中式日志系统
+3. **实施多层限流保护**
+   - 请求频率限制：防止单IP过度请求
+   - 并发连接限制：防止资源耗尽
+   - 请求体大小限制：防止大文件攻击
+   - 根据服务器性能调整参数
 
-5. **定期更新**
-   - 使用管理脚本定期更新到最新版本
-   - 关注安全公告和补丁
+### 🛡️ 系统安全加固
+
+4. **服务运行安全**
+   - 使用专用非特权用户运行服务
+   - 启用systemd安全特性（已内置）
+   - 配置适当的文件权限（600用于配置文件）
+   - 定期检查服务运行状态
+
+5. **网络安全配置**
+   - 配置防火墙只开放必要端口
+   - 使用HTTPS反向代理（推荐nginx/Apache）
+   - 考虑使用VPN或内网部署
+   - 监控异常网络连接
+
+6. **日志和监控**
+   - 启用详细日志记录
+   - 配置日志轮转防止磁盘满
+   - 设置异常告警（可用Webhook）
+   - 定期分析访问模式
+
+### 🔄 维护和更新
+
+7. **定期安全维护**
+   - 及时更新系统和Deno运行时
+   - 使用管理脚本检查服务状态
+   - 定期备份配置文件
+   - 运行安全检查脚本
+
+8. **安全检查工具**
+   ```bash
+   # 运行安全配置检查
+   curl -fsSL https://raw.githubusercontent.com/bestZwei/ciao-cors/main/security-check.sh | sudo bash
+
+   # 或下载后运行
+   wget https://raw.githubusercontent.com/bestZwei/ciao-cors/main/security-check.sh
+   chmod +x security-check.sh
+   sudo ./security-check.sh
+   ```
+
+### ⚠️ 安全警告
+
+- **永远不要**在生产环境中禁用所有安全限制
+- **永远不要**使用弱密码或默认密钥
+- **永远不要**允许代理访问内网地址（已内置保护）
+- **永远不要**忽略异常的流量模式
+- **定期检查**是否有未授权的配置更改
 
 ## 性能优化
 
@@ -470,7 +518,7 @@ deno lint server.ts
 ### 联系方式
 
 - GitHub Issues: [https://github.com/bestZwei/ciao-cors/issues](https://github.com/bestZwei/ciao-cors/issues)
-- Email: [post@zwei.de.eu.org](mailto:post@zwei.de.eu.org
+- Email: [post@zwei.de.eu.org](mailto:post@zwei.de.eu.org)
 
 ---
 

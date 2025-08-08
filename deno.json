@@ -1,0 +1,49 @@
+{
+  "version": "1.2.5",
+  "name": "ciao-cors",
+  "description": "A powerful CORS proxy server with advanced security features",
+  "author": "bestZwei",
+  "license": "MIT",
+  "compilerOptions": {
+    "allowJs": true,
+    "lib": ["deno.window"],
+    "strict": true,
+    "noImplicitAny": false,
+    "noImplicitReturns": true,
+    "noFallthroughCasesInSwitch": true,
+    "noUncheckedIndexedAccess": false
+  },
+  "lint": {
+    "rules": {
+      "tags": ["recommended"],
+      "exclude": ["no-explicit-any"]
+    }
+  },
+  "fmt": {
+    "useTabs": false,
+    "lineWidth": 120,
+    "indentWidth": 2,
+    "semiColons": true,
+    "singleQuote": true,
+    "proseWrap": "preserve"
+  },
+  "tasks": {
+    "start": "deno run --allow-net --allow-env --allow-read server.ts",
+    "dev": "deno run --allow-net --allow-env --allow-read --watch server.ts",
+    "check": "deno check server.ts",
+    "lint": "deno lint server.ts",
+    "fmt": "deno fmt server.ts",
+    "test": "deno test --allow-net --allow-env",
+    "security-check": "bash security-check.sh"
+  },
+  "permissions": {
+    "net": true,
+    "env": true,
+    "read": true
+  },
+  "exclude": [
+    "node_modules/",
+    "*.backup",
+    "*.log"
+  ]
+}

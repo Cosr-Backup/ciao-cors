@@ -33,7 +33,14 @@ function loadConfig(): Config {
   const parseArray = (str?: string): string[] => {
     if (!str) return [];
     try {
-      return JSON.parse(str);
+      const parsed = JSON.parse(str);
+      // 验证解析结果是数组且所有元素都是字符串
+      if (Array.isArray(parsed) && parsed.every(item => typeof item === 'string')) {
+        return parsed.filter(Boolean);
+      } else {
+        console.warn(`Invalid JSON array format: ${str}, falling back to comma-separated parsing`);
+        return str.split(',').map(s => s.trim()).filter(Boolean);
+      }
     } catch {
       return str.split(',').map(s => s.trim()).filter(Boolean);
     }
@@ -97,13 +104,19 @@ class RateLimiter {
   private windowMs: number;
   private maxRequests: number;
   private cleanupTimer: number | null = null;
+  private isDestroyed: boolean = false;
 
   constructor(windowMs: number, maxRequests: number) {
     this.windowMs = windowMs;
     this.maxRequests = maxRequests;
 
-    // 定期清理过期记录
-    this.cleanupTimer = setInterval(() => this.cleanup(), Math.min(windowMs, 60000)) as unknown as number;
+    // 定期清理过期记录，确保不会超过1分钟间隔
+    const cleanupInterval = Math.min(windowMs, 60000);
+    this.cleanupTimer = setInterval(() => {
+      if (!this.isDestroyed) {
+        this.cleanup();
+      }
+    }, cleanupInterval) as unknown as number;
   }
 
   checkLimit(ip: string): boolean {
@@ -136,6 +149,7 @@ class RateLimiter {
 
   // 清理资源
   destroy(): void {
+    this.isDestroyed = true;
     if (this.cleanupTimer !== null) {
       clearInterval(this.cleanupTimer);
       this.cleanupTimer = null;
@@ -156,34 +170,45 @@ class ConcurrencyLimiter {
   private totalCount = 0;
   private perIpLimit: number;
   private totalLimit: number;
+  private mutex: Promise<void> = Promise.resolve();
 
   constructor(perIpLimit: number, totalLimit: number) {
     this.perIpLimit = perIpLimit;
     this.totalLimit = totalLimit;
   }
 
-  acquire(ip: string): boolean {
-    const currentPerIp = this.perIpCount.get(ip) || 0;
-    
-    if (currentPerIp >= this.perIpLimit || this.totalCount >= this.totalLimit) {
-      return false;
-    }
-    
-    this.perIpCount.set(ip, currentPerIp + 1);
-    this.totalCount++;
-    return true;
+  async acquire(ip: string): Promise<boolean> {
+    return new Promise((resolve) => {
+      this.mutex = this.mutex.then(() => {
+        const currentPerIp = this.perIpCount.get(ip) || 0;
+
+        if (currentPerIp >= this.perIpLimit || this.totalCount >= this.totalLimit) {
+          resolve(false);
+          return;
+        }
+
+        this.perIpCount.set(ip, currentPerIp + 1);
+        this.totalCount++;
+        resolve(true);
+      });
+    });
   }
 
-  release(ip: string): void {
-    const currentPerIp = this.perIpCount.get(ip) || 0;
-    if (currentPerIp > 0) {
-      this.perIpCount.set(ip, currentPerIp - 1);
-      this.totalCount = Math.max(0, this.totalCount - 1);
-      
-      if (this.perIpCount.get(ip) === 0) {
-        this.perIpCount.delete(ip);
-      }
-    }
+  async release(ip: string): Promise<void> {
+    return new Promise((resolve) => {
+      this.mutex = this.mutex.then(() => {
+        const currentPerIp = this.perIpCount.get(ip) || 0;
+        if (currentPerIp > 0) {
+          this.perIpCount.set(ip, currentPerIp - 1);
+          this.totalCount = Math.max(0, this.totalCount - 1);
+
+          if (this.perIpCount.get(ip) === 0) {
+            this.perIpCount.delete(ip);
+          }
+        }
+        resolve();
+      });
+    });
   }
 
   getStats(): { perIpCount: Map<string, number>; totalCount: number } {
@@ -271,8 +296,8 @@ function validateRequest(url: string, ip: string, config: Config, origin?: strin
     const targetUrl = new URL(fixUrl(url));
     const hostname = targetUrl.hostname.toLowerCase();
 
-    // 检查私有IP地址范围
-    const privateIPPatterns = [
+    // 检查私有IP地址范围（IPv4）
+    const privateIPv4Patterns = [
       /^127\./,           // 127.0.0.0/8 (localhost)
       /^10\./,            // 10.0.0.0/8
       /^172\.(1[6-9]|2[0-9]|3[0-1])\./,  // 172.16.0.0/12
@@ -280,19 +305,57 @@ function validateRequest(url: string, ip: string, config: Config, origin?: strin
       /^169\.254\./,      // 169.254.0.0/16 (link-local)
       /^0\./,             // 0.0.0.0/8
       /^224\./,           // 224.0.0.0/4 (multicast)
-      /^240\./            // 240.0.0.0/4 (reserved)
+      /^240\./,           // 240.0.0.0/4 (reserved)
+      /^255\.255\.255\.255$/, // broadcast
+      /^100\.(6[4-9]|[7-9][0-9]|1[0-1][0-9]|12[0-7])\./  // 100.64.0.0/10 (carrier-grade NAT)
     ];
 
-    // 检查特殊域名
+    // 检查IPv6私有地址
+    const privateIPv6Patterns = [
+      /^::1$/,            // IPv6 localhost
+      /^::/,              // IPv6 unspecified
+      /^fe80:/,           // IPv6 link-local
+      /^fc00:/,           // IPv6 unique local
+      /^fd00:/,           // IPv6 unique local
+      /^ff00:/            // IPv6 multicast
+    ];
+
+    // 检查特殊域名和元数据服务
     const restrictedDomains = [
       'localhost',
       'metadata.google.internal',
-      '169.254.169.254'  // AWS/GCP metadata service
+      'metadata.goog',
+      '169.254.169.254',  // AWS/GCP metadata service
+      'metadata',
+      'instance-data',
+      'consul',
+      'vault.service.consul'
     ];
 
-    if (privateIPPatterns.some(pattern => pattern.test(hostname)) ||
-        restrictedDomains.includes(hostname)) {
-      return { valid: false, reason: 'Access to internal/private addresses is not allowed' };
+    // 检查是否为IP地址
+    const isIPv4 = /^(\d{1,3}\.){3}\d{1,3}$/.test(hostname);
+    const isIPv6 = hostname.includes(':') && !hostname.includes('.');
+
+    if (isIPv4 && privateIPv4Patterns.some(pattern => pattern.test(hostname))) {
+      return { valid: false, reason: 'Access to private IPv4 addresses is not allowed' };
+    }
+
+    if (isIPv6 && privateIPv6Patterns.some(pattern => pattern.test(hostname))) {
+      return { valid: false, reason: 'Access to private IPv6 addresses is not allowed' };
+    }
+
+    if (restrictedDomains.some(domain => hostname === domain || hostname.endsWith('.' + domain))) {
+      return { valid: false, reason: 'Access to restricted domains is not allowed' };
+    }
+
+    // 检查端口是否为敏感端口
+    const port = targetUrl.port;
+    if (port) {
+      const portNum = parseInt(port);
+      const restrictedPorts = [22, 23, 25, 53, 135, 139, 445, 993, 995, 1433, 1521, 3306, 3389, 5432, 5984, 6379, 9200, 11211, 27017];
+      if (restrictedPorts.includes(portNum)) {
+        return { valid: false, reason: 'Access to restricted ports is not allowed' };
+      }
     }
   } catch {
     // URL解析失败已在前面处理
@@ -344,7 +407,7 @@ function buildProxyHeaders(originalHeaders: Headers): Record<string, string> {
 /**
  * 处理请求body，支持各种content-type
  */
-async function processRequestBody(request: Request): Promise<any> {
+async function processRequestBody(request: Request, config: Config): Promise<any> {
   if (!['POST', 'PUT', 'PATCH', 'DELETE'].includes(request.method)) {
     return undefined;
   }
@@ -352,10 +415,10 @@ async function processRequestBody(request: Request): Promise<any> {
   const contentType = request.headers.get('content-type')?.toLowerCase() || '';
   const contentLength = request.headers.get('content-length');
 
-  // 检查内容长度限制 (默认最大10MB)
-  const maxBodySize = 10 * 1024 * 1024; // 10MB
+  // 从配置获取最大请求体大小，默认10MB
+  const maxBodySize = parseInt(Deno.env.get('MAX_BODY_SIZE') || '10485760'); // 10MB
   if (contentLength && parseInt(contentLength) > maxBodySize) {
-    throw new Error('Request body too large');
+    throw new Error(`Request body too large. Maximum size: ${maxBodySize} bytes`);
   }
 
   try {
@@ -406,7 +469,7 @@ async function processRequestBody(request: Request): Promise<any> {
  */
 async function performProxy(request: Request, targetUrl: string, config: Config): Promise<Response> {
   const headers = buildProxyHeaders(request.headers);
-  const body = await processRequestBody(request);
+  const body = await processRequestBody(request, config);
 
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), config.timeout);
@@ -452,6 +515,8 @@ class StatsCollector {
   // 添加存储周期性统计的数组
   private hourlyStats: { timestamp: number; requests: number }[] = [];
   private lastHourRequestCount: number = 0;
+  private hourlyTimer: number | null = null;
+  private isDestroyed: boolean = false;
 
   constructor() {
     this.stats = {
@@ -464,9 +529,13 @@ class StatsCollector {
       averageResponseTime: 0,
       startTime: Date.now()
     };
-    
+
     // 每小时记录一次统计数据
-    setInterval(() => this.recordHourlyStat(), 3600000);
+    this.hourlyTimer = setInterval(() => {
+      if (!this.isDestroyed) {
+        this.recordHourlyStat();
+      }
+    }, 3600000) as unknown as number;
   }
 
   recordRequest(ip: string, domain: string, statusCode: number, responseTime: number, success: boolean): void {
@@ -581,6 +650,15 @@ class StatsCollector {
     // 保留历史统计数据
     // this.hourlyStats = [];
   }
+
+  // 清理资源
+  destroy(): void {
+    this.isDestroyed = true;
+    if (this.hourlyTimer !== null) {
+      clearInterval(this.hourlyTimer);
+      this.hourlyTimer = null;
+    }
+  }
 }
 
 class Logger {
@@ -590,28 +668,38 @@ class Logger {
   private logBuffer: string[] = [];
   private bufferSize = 10;
   private bufferTimer: number | null = null;
+  private isDestroyed: boolean = false;
 
   constructor(enableConsole: boolean, webhookUrl?: string) {
     this.enableConsole = enableConsole;
     this.webhookUrl = webhookUrl;
-    
+
     // 定期刷新日志缓冲区
     if (this.webhookUrl) {
-      this.bufferTimer = setInterval(() => this.flushLogBuffer(), 30000) as unknown as number;
+      this.bufferTimer = setInterval(() => {
+        if (!this.isDestroyed) {
+          this.flushLogBuffer();
+        }
+      }, 30000) as unknown as number;
     }
   }
 
   logRequest(request: Request, response: Response, proxyUrl?: string, responseTime?: number): void {
     if (!this.enableConsole && !this.webhookUrl) return;
 
+    // 过滤敏感信息
+    const sanitizedUrl = this.sanitizeUrl(new URL(request.url).pathname);
+    const sanitizedProxyUrl = proxyUrl ? this.sanitizeUrl(proxyUrl) : undefined;
+    const sanitizedUserAgent = this.sanitizeUserAgent(request.headers.get('user-agent'));
+
     const logData = {
       timestamp: new Date().toISOString(),
       method: request.method,
-      url: new URL(request.url).pathname,
-      proxyUrl,
+      url: sanitizedUrl,
+      proxyUrl: sanitizedProxyUrl,
       statusCode: response.status,
       responseTime,
-      userAgent: request.headers.get('user-agent'),
+      userAgent: sanitizedUserAgent,
       referer: request.headers.get('referer'),
       ip: this.getClientIP(request)
     };
@@ -671,6 +759,7 @@ class Logger {
 
   // 清理资源
   cleanup(): void {
+    this.isDestroyed = true;
     if (this.bufferTimer !== null) {
       clearInterval(this.bufferTimer);
       this.bufferTimer = null;
@@ -683,6 +772,30 @@ class Logger {
            request.headers.get('x-forwarded-for')?.split(',')[0]?.trim() ||
            request.headers.get('x-real-ip') ||
            'unknown';
+  }
+
+  // 清理URL中的敏感信息
+  private sanitizeUrl(url: string): string {
+    try {
+      const urlObj = new URL(url.startsWith('http') ? url : `http://example.com${url}`);
+      // 移除查询参数中的敏感信息
+      const sensitiveParams = ['key', 'token', 'password', 'secret', 'auth', 'api_key'];
+      sensitiveParams.forEach(param => {
+        if (urlObj.searchParams.has(param)) {
+          urlObj.searchParams.set(param, '***');
+        }
+      });
+      return url.startsWith('http') ? urlObj.toString() : urlObj.pathname + urlObj.search;
+    } catch {
+      return url;
+    }
+  }
+
+  // 清理User-Agent中的敏感信息
+  private sanitizeUserAgent(userAgent: string | null): string | null {
+    if (!userAgent) return null;
+    // 移除可能的敏感信息，保留基本的浏览器信息
+    return userAgent.replace(/\b[\w-]{32,}\b/g, '***'); // 移除长的token-like字符串
   }
 }
 
@@ -697,6 +810,7 @@ class CiaoCorsServer {
   private responseCache: Map<string, { response: Response, timestamp: number }> = new Map();
   private cacheTTL = 60000; // 1分钟缓存
   private cacheCleanupTimer: number | null = null;
+  private isDestroyed: boolean = false;
 
   constructor() {
     this.config = loadConfig();
@@ -706,7 +820,11 @@ class CiaoCorsServer {
     this.logger = new Logger(this.config.enableLogging, this.config.logWebhook);
 
     // 定期清理缓存
-    this.cacheCleanupTimer = setInterval(() => this.cleanupCache(), 30000) as unknown as number;
+    this.cacheCleanupTimer = setInterval(() => {
+      if (!this.isDestroyed) {
+        this.cleanupCache();
+      }
+    }, 30000) as unknown as number;
   }
 
   async handleRequest(request: Request): Promise<Response> {
@@ -759,7 +877,7 @@ class CiaoCorsServer {
       }
 
       // 检查并发限制
-      if (!this.concurrencyLimiter.acquire(clientIP)) {
+      if (!(await this.concurrencyLimiter.acquire(clientIP))) {
         return this.createErrorResponse(503, 'Concurrency limit exceeded', {
           retryAfter: 5
         });
@@ -772,15 +890,15 @@ class CiaoCorsServer {
         // 安全验证
         const validation = validateRequest(targetPath, clientIP, this.config, origin || undefined);
         if (!validation.valid) {
-          this.concurrencyLimiter.release(clientIP);
+          await this.concurrencyLimiter.release(clientIP);
           return this.createErrorResponse(403, validation.reason || 'Request blocked');
         }
 
         // 执行代理请求
         const targetUrl = fixUrl(targetPath);
 
-        // 检查GET请求的缓存
-        const cacheKey = `${request.method}:${targetUrl}`;
+        // 检查GET请求的缓存（包含关键请求头以避免冲突）
+        const cacheKey = this.generateCacheKey(request, targetUrl);
         const cachedResponse = request.method === 'GET' ? this.responseCache.get(cacheKey) : undefined;
 
         if (cachedResponse && (Date.now() - cachedResponse.timestamp < this.cacheTTL)) {
@@ -818,8 +936,8 @@ class CiaoCorsServer {
             }
           } catch (proxyError) {
             // 处理代理请求错误
-            if (proxyError instanceof Error && proxyError.message === 'Request body too large') {
-              this.concurrencyLimiter.release(clientIP);
+            if (proxyError instanceof Error && proxyError.message.includes('Request body too large')) {
+              await this.concurrencyLimiter.release(clientIP);
               return this.createErrorResponse(413, 'Request body too large');
             }
             throw proxyError; // 重新抛出其他错误
@@ -839,12 +957,12 @@ class CiaoCorsServer {
         return response;
         
       } finally {
-        this.concurrencyLimiter.release(clientIP);
+        await this.concurrencyLimiter.release(clientIP);
       }
 
     } catch (error) {
       // 确保释放并发限制
-      this.concurrencyLimiter.release(clientIP);
+      await this.concurrencyLimiter.release(clientIP);
 
       // 改进错误处理和日志
       this.logger.logError(error as Error, {
@@ -858,8 +976,16 @@ class CiaoCorsServer {
         this.statsCollector.recordRequest(clientIP, 'error', 500, Date.now() - startTime, false);
       }
 
+      // 避免泄露敏感错误信息
+      const sanitizedMessage = error instanceof Error
+        ? (error.message.includes('ENOTFOUND') ? 'Target host not found' :
+           error.message.includes('ECONNREFUSED') ? 'Connection refused' :
+           error.message.includes('timeout') ? 'Request timeout' :
+           'Proxy error')
+        : 'Unknown error';
+
       return this.createErrorResponse(500, 'Proxy error', {
-        message: error instanceof Error ? error.message : 'Unknown error'
+        message: sanitizedMessage
       });
     }
   }
@@ -892,13 +1018,13 @@ class CiaoCorsServer {
   }
 
   handleManagementApi(request: Request, path: string): Response {
-    // API密钥验证
+    // API密钥验证（防时序攻击）
     if (this.config.apiKey) {
       const authHeader = request.headers.get('authorization');
-      const providedKey = authHeader?.replace('Bearer ', '') || 
+      const providedKey = authHeader?.replace('Bearer ', '') ||
                          new URL(request.url).searchParams.get('key');
-      
-      if (providedKey !== this.config.apiKey) {
+
+      if (!providedKey || !this.constantTimeCompare(providedKey, this.config.apiKey)) {
         return this.createErrorResponse(401, 'Invalid API key');
       }
     }
@@ -1123,6 +1249,50 @@ class CiaoCorsServer {
            request.headers.get('x-real-ip') ||
            'unknown';
   }
+
+  // 常量时间字符串比较，防止时序攻击
+  private constantTimeCompare(a: string, b: string): boolean {
+    if (a.length !== b.length) {
+      return false;
+    }
+
+    let result = 0;
+    for (let i = 0; i < a.length; i++) {
+      result |= a.charCodeAt(i) ^ b.charCodeAt(i);
+    }
+
+    return result === 0;
+  }
+
+  // 生成缓存键，包含关键请求头以避免冲突
+  private generateCacheKey(request: Request, targetUrl: string): string {
+    const method = request.method;
+    const userAgent = request.headers.get('user-agent') || '';
+    const accept = request.headers.get('accept') || '';
+    const acceptLanguage = request.headers.get('accept-language') || '';
+
+    // 创建更安全的哈希，避免冲突
+    const keyData = `${method}:${targetUrl}:${userAgent}:${accept}:${acceptLanguage}`;
+
+    // 使用更安全的哈希算法避免冲突
+    let hash = 0;
+    let hash2 = 0;
+    let hash3 = 0; // 三重哈希进一步减少冲突
+
+    for (let i = 0; i < keyData.length; i++) {
+      const char = keyData.charCodeAt(i);
+      hash = ((hash << 5) - hash) + char;
+      hash = hash & hash; // 转换为32位整数
+      hash2 = ((hash2 << 3) - hash2) + char;
+      hash2 = hash2 & hash2;
+      hash3 = ((hash3 << 7) - hash3) + char * (i + 1); // 位置相关哈希
+      hash3 = hash3 & hash3;
+    }
+
+    // 使用三重哈希、长度和校验和确保唯一性
+    const checksum = keyData.length + (keyData.charCodeAt(0) || 0) + (keyData.charCodeAt(keyData.length - 1) || 0);
+    return `${method}:${Math.abs(hash).toString(36)}:${Math.abs(hash2).toString(36)}:${Math.abs(hash3).toString(36)}:${checksum.toString(36)}`;
+  }
   
   // 重载配置
   reloadConfig(): void {
@@ -1155,8 +1325,10 @@ class CiaoCorsServer {
 
   // 清理资源
   cleanup(): void {
+    this.isDestroyed = true;
     this.logger.cleanup();
     this.rateLimiter.destroy();
+    this.statsCollector.destroy();
     if (this.cacheCleanupTimer !== null) {
       clearInterval(this.cacheCleanupTimer);
       this.cacheCleanupTimer = null;
