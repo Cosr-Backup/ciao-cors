@@ -566,6 +566,7 @@ download_project() {
                                 "trojan"
                                 "malware"
                                 "shellcode"
+                            )
 
                             if [[ "$has_malicious" == "false" ]]; then
                                 for malicious_str in "${malicious_strings[@]}"; do
