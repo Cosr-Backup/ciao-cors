@@ -159,11 +159,19 @@ check_requirements() {
 
   # 检查基本命令并安装
   local required_commands=("curl" "wget" "systemctl")
+  local optional_commands=("ss" "netstat" "lsof")
   local missing_commands=()
+  local missing_optional=()
 
   for cmd in "${required_commands[@]}"; do
       if ! command -v "$cmd" &> /dev/null; then
           missing_commands+=("$cmd")
+      fi
+  done
+
+  for cmd in "${optional_commands[@]}"; do
+      if ! command -v "$cmd" &> /dev/null; then
+          missing_optional+=("$cmd")
       fi
   done
 
@@ -191,6 +199,43 @@ check_requirements() {
       else
           print_status "error" "未找到支持的包管理器，请手动安装: ${missing_commands[*]}"
           return $EXIT_GENERAL_ERROR
+      fi
+  fi
+
+  # 安装可选的网络工具
+  if [[ ${#missing_optional[@]} -gt 0 ]]; then
+      print_status "info" "缺少网络工具: ${missing_optional[*]}"
+      read -p "是否安装这些工具以获得更好的监控体验? (Y/n): " install_optional
+      install_optional=${install_optional:-Y}
+
+      if [[ "$install_optional" =~ ^[Yy]$ ]]; then
+          if command -v yum &> /dev/null; then
+              # RHEL/CentOS系列
+              yum install -y net-tools iproute lsof || print_status "warning" "部分网络工具安装失败"
+          elif command -v apt &> /dev/null; then
+              # Debian/Ubuntu系列
+              apt install -y net-tools iproute2 lsof || print_status "warning" "部分网络工具安装失败"
+          elif command -v dnf &> /dev/null; then
+              # Fedora系列
+              dnf install -y net-tools iproute lsof || print_status "warning" "部分网络工具安装失败"
+          fi
+          print_status "success" "网络工具安装完成"
+      else
+          print_status "info" "跳过网络工具安装，部分监控功能可能受限"
+      fi
+  fi
+
+  # 安装可选的网络工具
+  if [[ ${#missing_optional[@]} -gt 0 ]]; then
+      print_status "info" "缺少网络工具: ${missing_optional[*]}"
+      print_status "info" "尝试安装网络工具以改善监控功能..."
+
+      if command -v yum &> /dev/null; then
+          yum install -y net-tools iproute lsof 2>/dev/null || print_status "warning" "网络工具安装失败"
+      elif command -v apt &> /dev/null; then
+          apt install -y net-tools iproute2 lsof 2>/dev/null || print_status "warning" "网络工具安装失败"
+      elif command -v dnf &> /dev/null; then
+          dnf install -y net-tools iproute lsof 2>/dev/null || print_status "warning" "网络工具安装失败"
       fi
   fi
 
@@ -453,26 +498,60 @@ validate_port() {
 check_port_usage() {
     local port=$1
 
-    # 使用多种方法检查端口占用
-    if command -v netstat &> /dev/null; then
-        if netstat -tuln 2>/dev/null | grep -q ":$port "; then
-            return 0  # 端口被占用
-        fi
-    fi
-
+    # 优先使用ss命令（现代Linux系统推荐）
     if command -v ss &> /dev/null; then
         if ss -tuln 2>/dev/null | grep -q ":$port "; then
             return 0  # 端口被占用
         fi
-    fi
-
-    if command -v lsof &> /dev/null; then
+    elif command -v netstat &> /dev/null; then
+        if netstat -tuln 2>/dev/null | grep -q ":$port "; then
+            return 0  # 端口被占用
+        fi
+    elif command -v lsof &> /dev/null; then
         if lsof -i ":$port" &> /dev/null; then
+            return 0  # 端口被占用
+        fi
+    else
+        # 如果都没有，尝试连接测试
+        if timeout 3 bash -c "</dev/tcp/localhost/$port" &>/dev/null; then
             return 0  # 端口被占用
         fi
     fi
 
     return 1  # 端口未被占用
+}
+
+# 获取端口监听状态
+get_port_info() {
+    local port=$1
+
+    if command -v ss &> /dev/null; then
+        ss -tuln | grep ":$port "
+    elif command -v netstat &> /dev/null; then
+        netstat -tuln | grep ":$port "
+    elif command -v lsof &> /dev/null; then
+        lsof -i ":$port"
+    else
+        echo "无法检查端口状态（缺少ss/netstat/lsof命令）"
+    fi
+}
+
+# 获取网络连接统计
+get_network_stats() {
+    local port=$1
+
+    if command -v ss &> /dev/null; then
+        echo "监听状态: $(ss -tuln | grep ":$port " | wc -l)"
+        echo "活动连接数: $(ss -an | grep ":$port" | grep ESTAB | wc -l)"
+        echo "总连接数: $(ss -an | grep ":$port" | wc -l)"
+    elif command -v netstat &> /dev/null; then
+        echo "监听状态: $(netstat -tuln | grep ":$port " | wc -l)"
+        echo "活动连接数: $(netstat -an | grep ":$port" | grep ESTABLISHED | wc -l)"
+        echo "总连接数: $(netstat -an | grep ":$port" | wc -l)"
+    else
+        echo "无法获取网络统计（建议安装ss或netstat）"
+        return 1
+    fi
 }
 
 # 创建配置文件
@@ -1382,50 +1461,259 @@ backup_config() {
 
 # ==================== 监控和维护函数 ====================
 
-# 服务健康检查
-health_check() {
-    print_status "info" "执行健康检查..."
-    
+# 服务诊断
+service_diagnosis() {
+    print_status "info" "执行服务诊断..."
+    echo
+
+    # 检查配置文件
     if [[ ! -f "$CONFIG_FILE" ]]; then
-        print_status "error" "配置文件不存在"
-        return 1
+        print_status "error" "配置文件不存在: $CONFIG_FILE"
+        return $EXIT_CONFIG_ERROR
     fi
-    
+
     local port=$(grep "^PORT=" "$CONFIG_FILE" | cut -d'=' -f2)
     local api_key=$(grep "^API_KEY=" "$CONFIG_FILE" | cut -d'=' -f2 2>/dev/null)
-    
+
+    print_status "title" "=== 配置检查 ==="
+    print_status "info" "配置文件: $CONFIG_FILE"
+    print_status "info" "服务端口: $port"
+    print_status "info" "API密钥: $([ -n "$api_key" ] && echo "已配置" || echo "未配置")"
+
     # 检查服务状态
+    echo
+    print_status "title" "=== 服务状态 ==="
+    if systemctl is-active --quiet "$SERVICE_NAME"; then
+        print_status "success" "服务正在运行"
+        local pid=$(systemctl show -p MainPID --value "$SERVICE_NAME")
+        print_status "info" "进程ID: $pid"
+
+        # 检查进程资源使用
+        if [[ -n "$pid" ]] && [[ "$pid" != "0" ]]; then
+            local cpu_usage=$(ps -p "$pid" -o %cpu --no-headers 2>/dev/null | xargs)
+            local mem_usage=$(ps -p "$pid" -o %mem --no-headers 2>/dev/null | xargs)
+            print_status "info" "CPU使用率: ${cpu_usage}%"
+            print_status "info" "内存使用率: ${mem_usage}%"
+        fi
+    else
+        print_status "error" "服务未运行"
+        print_status "info" "尝试查看服务状态..."
+        systemctl status "$SERVICE_NAME" --no-pager -l
+    fi
+
+    # 检查端口监听
+    echo
+    print_status "title" "=== 端口检查 ==="
+    local port_listening=false
+
+    if command -v ss &> /dev/null; then
+        if ss -tuln | grep -q ":$port "; then
+            port_listening=true
+            print_status "success" "端口 $port 正在监听"
+            ss -tuln | grep ":$port"
+        fi
+    elif command -v netstat &> /dev/null; then
+        if netstat -tuln | grep -q ":$port "; then
+            port_listening=true
+            print_status "success" "端口 $port 正在监听"
+            netstat -tuln | grep ":$port"
+        fi
+    elif command -v lsof &> /dev/null; then
+        if lsof -i ":$port" &> /dev/null; then
+            port_listening=true
+            print_status "success" "端口 $port 正在监听"
+            lsof -i ":$port"
+        fi
+    fi
+
+    if [[ "$port_listening" != "true" ]]; then
+        print_status "error" "端口 $port 未监听"
+        print_status "info" "可能的原因:"
+        echo "  1. 服务启动失败"
+        echo "  2. 端口被其他进程占用"
+        echo "  3. 防火墙阻止了端口"
+        echo "  4. Deno权限不足"
+    fi
+
+    # 检查Deno和项目文件
+    echo
+    print_status "title" "=== 文件检查 ==="
+    if command -v deno &> /dev/null; then
+        local deno_version=$(deno --version | head -n 1 | awk '{print $2}')
+        print_status "success" "Deno版本: $deno_version"
+    else
+        print_status "error" "Deno未安装或不在PATH中"
+    fi
+
+    if [[ -f "$INSTALL_DIR/server.ts" ]]; then
+        print_status "success" "项目文件存在: $INSTALL_DIR/server.ts"
+        local file_size=$(stat -c%s "$INSTALL_DIR/server.ts" 2>/dev/null || echo "unknown")
+        print_status "info" "文件大小: $file_size 字节"
+    else
+        print_status "error" "项目文件不存在: $INSTALL_DIR/server.ts"
+    fi
+
+    # 尝试API健康检查
+    if [[ "$port_listening" == "true" ]]; then
+        echo
+        print_status "title" "=== API检查 ==="
+        local health_url="http://localhost:$port/health"
+
+        print_status "info" "测试基础健康检查..."
+        local response=$(curl -s -w "%{http_code}" -o /tmp/health_check.json --connect-timeout 5 "$health_url" 2>/dev/null)
+
+        if [[ "$response" == "200" ]]; then
+            print_status "success" "基础健康检查通过"
+        else
+            print_status "warning" "基础健康检查失败 (HTTP: $response)"
+        fi
+
+        # 如果有API密钥，测试管理API
+        if [[ -n "$api_key" ]]; then
+            local api_url="http://localhost:$port/_api/health?key=$api_key"
+            print_status "info" "测试管理API..."
+            response=$(curl -s -w "%{http_code}" -o /tmp/api_check.json --connect-timeout 5 "$api_url" 2>/dev/null)
+
+            if [[ "$response" == "200" ]]; then
+                print_status "success" "管理API检查通过"
+                if [[ -f /tmp/api_check.json ]]; then
+                    echo
+                    print_status "info" "API响应:"
+                    cat /tmp/api_check.json | python3 -m json.tool 2>/dev/null || cat /tmp/api_check.json
+                fi
+            else
+                print_status "warning" "管理API检查失败 (HTTP: $response)"
+            fi
+        fi
+
+        # 清理临时文件
+        rm -f /tmp/health_check.json /tmp/api_check.json
+    fi
+
+    echo
+    print_status "info" "诊断完成"
+}
+
+# 服务健康检查（增强版）
+health_check() {
+    print_status "info" "执行健康检查..."
+
+    if [[ ! -f "$CONFIG_FILE" ]]; then
+        print_status "error" "配置文件不存在"
+        return $EXIT_CONFIG_ERROR
+    fi
+
+    local port=$(grep "^PORT=" "$CONFIG_FILE" | cut -d'=' -f2)
+    local api_key=$(grep "^API_KEY=" "$CONFIG_FILE" | cut -d'=' -f2 2>/dev/null)
+
+    if [[ -z "$port" ]]; then
+        print_status "error" "无法从配置文件获取端口信息"
+        return $EXIT_CONFIG_ERROR
+    fi
+
+    # 检查服务状态
+    print_status "info" "检查服务进程状态..."
     if ! systemctl is-active --quiet "$SERVICE_NAME"; then
         print_status "error" "服务未运行"
-        return 1
+        print_status "info" "服务状态详情:"
+        systemctl status "$SERVICE_NAME" --no-pager -l | head -10
+        return $EXIT_SERVICE_ERROR
     fi
-    
+    print_status "success" "服务进程运行正常"
+
     # 检查端口监听
-    if ! netstat -tuln | grep -q ":$port "; then
+    print_status "info" "检查端口 $port 监听状态..."
+    local port_check=false
+    local port_info=""
+
+    if command -v ss &> /dev/null; then
+        port_info=$(ss -tuln | grep ":$port ")
+        [[ -n "$port_info" ]] && port_check=true
+    elif command -v netstat &> /dev/null; then
+        port_info=$(netstat -tuln | grep ":$port ")
+        [[ -n "$port_info" ]] && port_check=true
+    elif command -v lsof &> /dev/null; then
+        port_info=$(lsof -i ":$port" 2>/dev/null)
+        [[ -n "$port_info" ]] && port_check=true
+    else
+        # 使用连接测试作为最后手段
+        if timeout 3 bash -c "</dev/tcp/localhost/$port" &>/dev/null; then
+            port_check=true
+            port_info="端口可连接（通过连接测试验证）"
+        fi
+    fi
+
+    if [[ "$port_check" == "true" ]]; then
+        print_status "success" "端口 $port 正在监听"
+        if [[ -n "$port_info" ]]; then
+            print_status "info" "端口详情: $port_info"
+        fi
+    else
         print_status "error" "端口 $port 未监听"
-        return 1
+        print_status "info" "可能原因:"
+        echo "  1. 服务启动失败"
+        echo "  2. 端口配置错误"
+        echo "  3. 防火墙阻止"
+        echo "  4. 权限问题"
+        return $EXIT_SERVICE_ERROR
     fi
-    
+
     # 检查API响应
-    local health_url="http://localhost:$port/_api/health"
-    if [[ -n "$api_key" ]]; then
-        health_url="${health_url}?key=$api_key"
+    print_status "info" "检查API响应..."
+    local health_url="http://localhost:$port/health"
+    local response=$(curl -s -w "%{http_code}" -o /tmp/health_response.json --connect-timeout 10 --max-time 30 "$health_url" 2>/dev/null)
+
+    if [[ "$response" == "200" ]]; then
+        print_status "success" "基础健康检查通过"
+    else
+        # 尝试管理API健康检查
+        health_url="http://localhost:$port/_api/health"
+        if [[ -n "$api_key" ]]; then
+            health_url="${health_url}?key=$api_key"
+        fi
+
+        response=$(curl -s -w "%{http_code}" -o /tmp/health_response.json --connect-timeout 10 --max-time 30 "$health_url" 2>/dev/null)
     fi
-    
-    local response=$(curl -s -w "%{http_code}" -o /tmp/health_check.json "$health_url" 2>/dev/null)
-    
+
     if [[ "$response" == "200" ]]; then
         print_status "success" "服务健康检查通过"
-        if [[ -f /tmp/health_check.json ]]; then
+
+        # 显示健康检查响应
+        if [[ -f /tmp/health_response.json ]] && [[ -s /tmp/health_response.json ]]; then
             echo
             print_status "info" "健康检查响应:"
-            cat /tmp/health_check.json | python3 -m json.tool 2>/dev/null || cat /tmp/health_check.json
-            rm -f /tmp/health_check.json
+            if command -v jq &> /dev/null; then
+                jq . /tmp/health_response.json 2>/dev/null || cat /tmp/health_response.json
+            elif command -v python3 &> /dev/null; then
+                python3 -m json.tool /tmp/health_response.json 2>/dev/null || cat /tmp/health_response.json
+            else
+                cat /tmp/health_response.json
+            fi
         fi
-        return 0
+
+        rm -f /tmp/health_response.json
+        return $EXIT_SUCCESS
     else
         print_status "error" "健康检查失败 (HTTP: $response)"
-        return 1
+        print_status "info" "测试的URL: $health_url"
+
+        # 显示错误响应
+        if [[ -f /tmp/health_response.json ]] && [[ -s /tmp/health_response.json ]]; then
+            print_status "info" "错误响应:"
+            cat /tmp/health_response.json
+        fi
+
+        rm -f /tmp/health_response.json
+
+        # 提供故障排除建议
+        echo
+        print_status "info" "故障排除建议:"
+        echo "  1. 检查服务日志: sudo journalctl -u $SERVICE_NAME -n 50"
+        echo "  2. 检查配置文件: cat $CONFIG_FILE"
+        echo "  3. 手动测试连接: curl -v http://localhost:$port/health"
+        echo "  4. 检查防火墙: sudo firewall-cmd --list-ports"
+
+        return $EXIT_SERVICE_ERROR
     fi
 }
 
@@ -1450,8 +1738,24 @@ performance_monitor() {
     print_status "title" "=== 网络连接 ==="
     if [[ -f "$CONFIG_FILE" ]]; then
         local port=$(grep "^PORT=" "$CONFIG_FILE" | cut -d'=' -f2)
-        netstat -tuln | grep ":$port"
-        echo "活动连接数: $(netstat -an | grep ":$port" | grep ESTABLISHED | wc -l)"
+
+        # 使用多种方法检查端口监听
+        if command -v ss &> /dev/null; then
+            echo "端口监听状态:"
+            ss -tuln | grep ":$port" || echo "端口 $port 未监听"
+            echo "活动连接数: $(ss -an | grep ":$port" | grep ESTAB | wc -l)"
+        elif command -v netstat &> /dev/null; then
+            echo "端口监听状态:"
+            netstat -tuln | grep ":$port" || echo "端口 $port 未监听"
+            echo "活动连接数: $(netstat -an | grep ":$port" | grep ESTABLISHED | wc -l)"
+        elif command -v lsof &> /dev/null; then
+            echo "端口监听状态:"
+            lsof -i ":$port" || echo "端口 $port 未监听"
+            echo "活动连接数: $(lsof -i ":$port" | grep ESTABLISHED | wc -l)"
+        else
+            echo "无法检查网络连接状态（缺少 ss/netstat/lsof 命令）"
+            print_status "warning" "建议安装 net-tools 或 iproute2 包"
+        fi
     fi
     
     # 日志统计
@@ -1860,14 +2164,15 @@ show_main_menu() {
         
         print_status "cyan" "📊 监控维护"
         echo "  9) 健康检查"
-        echo " 10) 性能监控"
-        echo " 11) 更新服务"
-        echo " 12) 系统优化"
+        echo " 10) 服务诊断"
+        echo " 11) 性能监控"
+        echo " 12) 更新服务"
+        echo " 13) 系统优化"
         echo
 
         print_status "cyan" "🗑️  其他操作"
-        echo " 13) 检查脚本更新"
-        echo " 14) 完全卸载"
+        echo " 14) 检查脚本更新"
+        echo " 15) 完全卸载"
         echo "  0) 退出脚本"
         
     else
@@ -1946,11 +2251,12 @@ handle_user_input() {
       7) show_config ;;
       8) backup_config ;;
       9) health_check ;;
-      10) performance_monitor ;;
-      11) update_service ;;
-      12) optimize_system ;;
-      13) check_script_update ;;
-      14) uninstall_service ;;
+      10) service_diagnosis ;;
+      11) performance_monitor ;;
+      12) update_service ;;
+      13) optimize_system ;;
+      14) check_script_update ;;
+      15) uninstall_service ;;
       0)
           print_status "info" "再见! 👋"
           exit $EXIT_SUCCESS
@@ -2040,7 +2346,7 @@ main() {
 
         # 读取用户输入，增加超时
         local choice=""
-        read -t 300 -p "请选择操作 [0-14]: " choice 2>/dev/null || {
+        read -t 300 -p "请选择操作 [0-15]: " choice 2>/dev/null || {
             echo
             print_status "warning" "输入超时，退出脚本"
             break

@@ -259,6 +259,32 @@ cat /etc/resolv.conf
 echo "nameserver 8.8.8.8" > /etc/resolv.conf
 ```
 
+**Q: 健康检查显示"端口未监听"但服务在运行**
+```bash
+# 安装网络工具
+sudo apt install net-tools iproute2 lsof  # Ubuntu/Debian
+sudo yum install net-tools iproute lsof   # CentOS/RHEL
+
+# 手动检查端口
+sudo ss -tuln | grep :3000
+sudo netstat -tuln | grep :3000
+sudo lsof -i :3000
+
+# 检查服务日志
+sudo journalctl -u ciao-cors -f
+```
+
+**Q: 性能监控显示"netstat: command not found"**
+```bash
+# 现代Linux系统推荐使用ss命令
+sudo apt install iproute2  # Ubuntu/Debian
+sudo yum install iproute   # CentOS/RHEL
+
+# 或安装传统的net-tools
+sudo apt install net-tools  # Ubuntu/Debian
+sudo yum install net-tools  # CentOS/RHEL
+```
+
 **Q: Deno安装失败**
 ```bash
 # 手动安装Deno
@@ -334,6 +360,26 @@ export ALLOWED_ORIGINS='["*"]'
 # 或者指定特定域名
 export ALLOWED_ORIGINS='["https://your-app.com"]'
 ```
+
+### 快速诊断
+
+**使用诊断脚本**
+```bash
+# 下载诊断脚本
+curl -fsSL https://raw.githubusercontent.com/bestZwei/ciao-cors/main/diagnose.sh -o diagnose.sh
+chmod +x diagnose.sh
+
+# 运行诊断
+sudo ./diagnose.sh
+```
+
+诊断脚本会自动检查：
+- 系统状态和资源
+- 服务运行状态
+- 配置文件有效性
+- 网络连接和端口监听
+- 错误日志分析
+- 提供自动修复建议
 
 ### 调试技巧
 
