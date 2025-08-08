@@ -2,7 +2,9 @@
 
 高性能、功能完整的CORS代理服务，支持多种部署方式和丰富的配置选项。专为需要跨域资源访问的Web应用设计，提供了安全、可靠的代理解决方案。
 
-🌐 **在线演示**: [cors.ciao.su](https://cors.ciao.su) | 📖 **文档**: [GitHub](https://github.com/bestZwei/ciao-cors)
+🌐 **在线演示**: [cors.ciao.su](https://cors.ciao.su)
+
+感谢 **[DreamCloud](https://whmcs.as211392.com)** 提供的高防服务器支持，为本项目提供稳定可靠的演示环境。
 
 ## 功能特性
 
@@ -511,25 +513,6 @@ deno fmt server.ts
 
 # 代码lint
 deno lint server.ts
-```
-
-### Demo
-
-🌐 **演示站点**: [cors.ciao.su](https://cors.ciao.su)
-
-感谢 **[DreamCloud](https://whmcs.as211392.com)** 提供的高防服务器支持，为本项目提供稳定可靠的演示环境。
-
-### 使用演示
-
-```bash
-# 测试演示服务
-curl https://cors.ciao.su/httpbin.org/ip
-
-# 获取服务状态
-curl https://cors.ciao.su/_api/health
-
-# 查看统计信息（如果启用）
-curl https://cors.ciao.su/_api/stats
 ```
 
 ## 支持
