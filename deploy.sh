@@ -1312,8 +1312,9 @@ RestrictSUIDSGID=true
 RestrictNamespaces=true
 RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
 LockPersonality=true
-SystemCallFilter=@system-service
-SystemCallFilter=~@debug @mount @cpu-emulation @obsolete @privileged @reboot @swap
+# 注释掉过于严格的系统调用过滤器，避免 SIGSYS 错误
+# SystemCallFilter=@system-service
+# SystemCallFilter=~@debug @mount @cpu-emulation @obsolete @privileged @reboot @swap
 
 # 资源限制
 LimitNOFILE=65536
