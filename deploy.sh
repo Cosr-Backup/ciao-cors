@@ -2,12 +2,12 @@
 
 # CIAO-CORS 一键部署和管理脚本
 # 支持安装、配置、监控、更新、卸载等完整功能
-# 版本: 1.2.0
+# 版本: 1.2.5
 # 作者: bestZwei
 # 项目: https://github.com/bestZwei/ciao-cors
 
 # ==================== 全局变量 ====================
-SCRIPT_VERSION="1.2.0"
+SCRIPT_VERSION="1.2.5"
 PROJECT_NAME="ciao-cors"
 DEFAULT_PORT=3000
 INSTALL_DIR="/opt/ciao-cors"
@@ -353,20 +353,34 @@ install_deno() {
 
     # 手动下载安装
     local download_url="https://github.com/denoland/deno/releases/latest/download/deno-${deno_arch}.zip"
-    local temp_file="/tmp/deno.zip"
+    local temp_file=$(mktemp --suffix=.zip)
 
     print_status "info" "下载Deno二进制文件..."
     if curl -fsSL "$download_url" -o "$temp_file"; then
       print_status "success" "下载完成"
+
+      # 验证下载的文件
+      if [[ ! -s "$temp_file" ]]; then
+        print_status "error" "下载的文件为空"
+        rm -f "$temp_file"
+        return $EXIT_NETWORK_ERROR
+      fi
     else
       print_status "error" "下载失败，请检查网络连接"
+      rm -f "$temp_file"
       return $EXIT_NETWORK_ERROR
     fi
 
     # 解压安装
-    if unzip -o "$temp_file" -d "$deno_install_dir"; then
+    if unzip -o "$temp_file" -d "$deno_install_dir" 2>/dev/null; then
       print_status "success" "解压完成"
       rm -f "$temp_file"
+
+      # 验证安装
+      if [[ ! -f "$deno_install_dir/deno" ]]; then
+        print_status "error" "Deno二进制文件未找到"
+        return $EXIT_GENERAL_ERROR
+      fi
     else
       print_status "error" "解压失败"
       rm -f "$temp_file"
@@ -497,6 +511,58 @@ validate_port() {
     fi
 
     return 0
+}
+
+# 验证JSON数组格式
+validate_json_array() {
+    local json_str="$1"
+    local name="$2"
+
+    if [[ -z "$json_str" ]]; then
+        return 0
+    fi
+
+    # 使用python或node.js验证JSON格式
+    if command -v python3 &> /dev/null; then
+        echo "$json_str" | python3 -c "import sys,json; json.load(sys.stdin)" 2>/dev/null
+        if [[ $? -ne 0 ]]; then
+            print_status "warning" "$name JSON格式无效: $json_str"
+            return 1
+        fi
+    elif command -v node &> /dev/null; then
+        echo "$json_str" | node -e "JSON.parse(require('fs').readFileSync(0, 'utf8'))" 2>/dev/null
+        if [[ $? -ne 0 ]]; then
+            print_status "warning" "$name JSON格式无效: $json_str"
+            return 1
+        fi
+    fi
+
+    return 0
+}
+
+# 安全地生成JSON数组配置
+generate_json_array() {
+    local input="$1"
+    local name="$2"
+
+    if [[ -z "$input" ]]; then
+        echo ""
+        return 0
+    fi
+
+    # 清理输入：移除多余空格，标准化分隔符
+    local cleaned=$(echo "$input" | sed 's/[[:space:]]*,[[:space:]]*/,/g' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+
+    # 生成JSON数组
+    local json_array="[\"$(echo "$cleaned" | sed 's/,/","/g')\"]"
+
+    # 验证生成的JSON
+    if validate_json_array "$json_array" "$name"; then
+        echo "$json_array"
+    else
+        print_status "error" "无法生成有效的$name JSON配置"
+        return 1
+    fi
 }
 
 # 检查端口占用
@@ -683,6 +749,22 @@ create_config() {
     read -p "禁止的域名 (逗号分隔): " blocked_domains
     read -p "允许的域名 (逗号分隔，留空表示允许所有): " allowed_domains
 
+    # 来源白名单
+    echo
+    print_status "info" "CORS来源配置:"
+    echo "  - 设置允许的请求来源域名"
+    echo "  - 用于CORS验证，留空表示允许所有来源"
+    echo "  - 示例: https://example.com,https://app.com"
+    read -p "来源白名单 (逗号分隔，留空表示允许所有): " allowed_origins
+
+    # 日志Webhook
+    echo
+    print_status "info" "日志Webhook配置 (可选):"
+    echo "  - 将日志发送到外部服务"
+    echo "  - 支持Discord、Slack等Webhook URL"
+    echo "  - 留空表示不使用Webhook"
+    read -p "日志Webhook URL (可选): " log_webhook
+
     # 验证IP地址格式
     if [[ -n "$blocked_ips" ]]; then
         local invalid_ips=""
@@ -750,19 +832,51 @@ EOF
 
     if [[ -n "$blocked_ips" ]]; then
         echo "# IP黑名单" >> "$CONFIG_FILE"
-        echo "BLOCKED_IPS=[\"$(echo "$blocked_ips" | sed 's/,/","/g')\"]" >> "$CONFIG_FILE"
+        local json_array=$(generate_json_array "$blocked_ips" "IP黑名单")
+        if [[ $? -eq 0 ]] && [[ -n "$json_array" ]]; then
+            echo "BLOCKED_IPS=$json_array" >> "$CONFIG_FILE"
+        else
+            print_status "error" "IP黑名单配置生成失败，跳过此项"
+        fi
         echo "" >> "$CONFIG_FILE"
     fi
 
     if [[ -n "$blocked_domains" ]]; then
         echo "# 域名黑名单" >> "$CONFIG_FILE"
-        echo "BLOCKED_DOMAINS=[\"$(echo "$blocked_domains" | sed 's/,/","/g')\"]" >> "$CONFIG_FILE"
+        local json_array=$(generate_json_array "$blocked_domains" "域名黑名单")
+        if [[ $? -eq 0 ]] && [[ -n "$json_array" ]]; then
+            echo "BLOCKED_DOMAINS=$json_array" >> "$CONFIG_FILE"
+        else
+            print_status "error" "域名黑名单配置生成失败，跳过此项"
+        fi
         echo "" >> "$CONFIG_FILE"
     fi
 
     if [[ -n "$allowed_domains" ]]; then
         echo "# 域名白名单" >> "$CONFIG_FILE"
-        echo "ALLOWED_DOMAINS=[\"$(echo "$allowed_domains" | sed 's/,/","/g')\"]" >> "$CONFIG_FILE"
+        local json_array=$(generate_json_array "$allowed_domains" "域名白名单")
+        if [[ $? -eq 0 ]] && [[ -n "$json_array" ]]; then
+            echo "ALLOWED_DOMAINS=$json_array" >> "$CONFIG_FILE"
+        else
+            print_status "error" "域名白名单配置生成失败，跳过此项"
+        fi
+        echo "" >> "$CONFIG_FILE"
+    fi
+
+    if [[ -n "$allowed_origins" ]]; then
+        echo "# 来源白名单" >> "$CONFIG_FILE"
+        local json_array=$(generate_json_array "$allowed_origins" "来源白名单")
+        if [[ $? -eq 0 ]] && [[ -n "$json_array" ]]; then
+            echo "ALLOWED_ORIGINS=$json_array" >> "$CONFIG_FILE"
+        else
+            print_status "error" "来源白名单配置生成失败，跳过此项"
+        fi
+        echo "" >> "$CONFIG_FILE"
+    fi
+
+    if [[ -n "$log_webhook" ]]; then
+        echo "# 日志Webhook" >> "$CONFIG_FILE"
+        echo "LOG_WEBHOOK=$log_webhook" >> "$CONFIG_FILE"
         echo "" >> "$CONFIG_FILE"
     fi
 
@@ -931,7 +1045,7 @@ Environment=DENO_INSTALL=/usr/local/deno
 Environment=PATH=/usr/local/deno/bin:/usr/local/bin:/usr/bin:/bin
 EnvironmentFile=-$CONFIG_FILE
 ExecStart=$deno_path run --allow-net --allow-env --no-prompt server.ts
-ExecReload=/bin/kill -HUP \$MAINPID
+ExecReload=/bin/bash -c 'PORT=\$(grep "^PORT=" $CONFIG_FILE | cut -d"=" -f2); API_KEY=\$(grep "^API_KEY=" $CONFIG_FILE | cut -d"=" -f2); curl -s "http://localhost:\$PORT/_api/reload-config?key=\$API_KEY" || /bin/kill -HUP \$MAINPID'
 Restart=always
 RestartSec=10
 TimeoutStartSec=30
@@ -964,6 +1078,10 @@ LimitNPROC=4096
 [Install]
 WantedBy=multi-user.target
 EOF
+
+    # 设置服务文件权限
+    chmod 644 "$SYSTEMD_SERVICE_FILE"
+    chown root:root "$SYSTEMD_SERVICE_FILE" 2>/dev/null || true
 
     # 验证服务文件
     if [[ ! -f "$SYSTEMD_SERVICE_FILE" ]]; then
@@ -1326,11 +1444,12 @@ modify_config() {
     echo "4) 限流配置"
     echo "5) 安全配置"
     echo "6) 直接编辑配置文件"
+    echo "7) 重置统计数据"
     echo "0) 返回主菜单"
     echo
     
-    read -p "请选择 [0-6]: " choice
-    
+    read -p "请选择 [0-7]: " choice
+
     case $choice in
         1) modify_port ;;
         2) modify_api_key ;;
@@ -1338,6 +1457,7 @@ modify_config() {
         4) modify_rate_limit ;;
         5) modify_security ;;
         6) edit_config_file ;;
+        7) reset_stats ;;
         0) return 0 ;;
         *) print_status "error" "无效选择" ;;
     esac
@@ -1352,11 +1472,21 @@ modify_port() {
     if [[ "$new_port" =~ ^[0-9]+$ ]] && [ "$new_port" -ge 1 ] && [ "$new_port" -le 65535 ]; then
         sed -i "s/^PORT=.*/PORT=$new_port/" "$CONFIG_FILE"
         print_status "success" "端口已更新为: $new_port"
-        
+
         # 配置防火墙
         configure_firewall "$new_port"
-        
-        print_status "warning" "请重启服务以应用更改"
+
+        # 询问是否立即重启服务
+        if systemctl is-active --quiet "$SERVICE_NAME"; then
+            read -p "是否立即重启服务以应用更改? (Y/n): " restart_now
+            if [[ ! "$restart_now" =~ ^[Nn]$ ]]; then
+                restart_service
+            else
+                print_status "warning" "请手动重启服务以应用更改"
+            fi
+        else
+            print_status "info" "服务未运行，配置将在下次启动时生效"
+        fi
     else
         print_status "error" "无效的端口号"
     fi
@@ -1380,7 +1510,51 @@ modify_api_key() {
         print_status "success" "API密钥已删除"
     fi
     
-    print_status "warning" "请重启服务以应用更改"
+    # 尝试热重载配置
+    if systemctl is-active --quiet "$SERVICE_NAME"; then
+        local port=$(grep "^PORT=" "$CONFIG_FILE" | cut -d'=' -f2 2>/dev/null)
+        local api_key=$(grep "^API_KEY=" "$CONFIG_FILE" | cut -d'=' -f2 2>/dev/null)
+
+        if [[ -n "$port" ]] && [[ -n "$api_key" ]]; then
+            print_status "info" "尝试热重载配置..."
+            local reload_response=$(curl -s --connect-timeout 5 --max-time 10 "http://localhost:$port/_api/reload-config?key=$api_key" 2>/dev/null)
+            local curl_exit_code=$?
+
+            if [[ $curl_exit_code -eq 0 ]] && [[ -n "$reload_response" ]] && echo "$reload_response" | grep -q '"success":true'; then
+                print_status "success" "配置已热重载，无需重启服务"
+                # 显示重载后的配置摘要
+                if command -v jq &> /dev/null; then
+                    echo "重载配置摘要:"
+                    echo "$reload_response" | jq -r '.config | to_entries[] | "  \(.key): \(.value)"' 2>/dev/null || true
+                fi
+                return 0
+            else
+                if [[ $curl_exit_code -ne 0 ]]; then
+                    print_status "warning" "热重载失败: 无法连接到服务 (curl exit code: $curl_exit_code)"
+                elif [[ -z "$reload_response" ]]; then
+                    print_status "warning" "热重载失败: 服务无响应"
+                else
+                    print_status "warning" "热重载失败: $(echo "$reload_response" | grep -o '"message":"[^"]*"' | cut -d'"' -f4 2>/dev/null || echo "未知错误")"
+                fi
+                print_status "info" "将尝试重启服务以应用配置"
+            fi
+        else
+            if [[ -z "$port" ]]; then
+                print_status "warning" "无法获取端口信息，跳过热重载"
+            elif [[ -z "$api_key" ]]; then
+                print_status "warning" "未设置API密钥，跳过热重载"
+            fi
+        fi
+
+        read -p "是否立即重启服务以应用更改? (Y/n): " restart_now
+        if [[ ! "$restart_now" =~ ^[Nn]$ ]]; then
+            restart_service
+        else
+            print_status "warning" "请手动重启服务以应用更改"
+        fi
+    else
+        print_status "info" "服务未运行，配置将在下次启动时生效"
+    fi
 }
 
 # 修改统计功能
@@ -1432,33 +1606,100 @@ modify_rate_limit() {
 modify_security() {
     echo
     print_status "info" "当前安全配置:"
-    grep -E "^(BLOCKED_IPS|BLOCKED_DOMAINS|ALLOWED_DOMAINS)=" "$CONFIG_FILE" 2>/dev/null || print_status "info" "无安全配置"
+    grep -E "^(BLOCKED_IPS|BLOCKED_DOMAINS|ALLOWED_DOMAINS|ALLOWED_ORIGINS|LOG_WEBHOOK)=" "$CONFIG_FILE" 2>/dev/null || print_status "info" "无安全配置"
     echo
     
     read -p "禁止的IP地址 (逗号分隔，留空清除): " blocked_ips
     read -p "禁止的域名 (逗号分隔，留空清除): " blocked_domains
     read -p "允许的域名 (逗号分隔，留空清除): " allowed_domains
+    read -p "来源白名单 (逗号分隔，留空清除): " allowed_origins
+    read -p "日志Webhook URL (留空清除): " log_webhook
     
     # 删除旧配置
     sed -i '/^BLOCKED_IPS=/d' "$CONFIG_FILE"
     sed -i '/^BLOCKED_DOMAINS=/d' "$CONFIG_FILE"
     sed -i '/^ALLOWED_DOMAINS=/d' "$CONFIG_FILE"
+    sed -i '/^ALLOWED_ORIGINS=/d' "$CONFIG_FILE"
+    sed -i '/^LOG_WEBHOOK=/d' "$CONFIG_FILE"
     
     # 添加新配置
     if [[ -n "$blocked_ips" ]]; then
-        echo "BLOCKED_IPS=[\"$(echo "$blocked_ips" | sed 's/,/","/g')\"]" >> "$CONFIG_FILE"
+        local json_array=$(generate_json_array "$blocked_ips" "IP黑名单")
+        if [[ $? -eq 0 ]] && [[ -n "$json_array" ]]; then
+            echo "BLOCKED_IPS=$json_array" >> "$CONFIG_FILE"
+        fi
     fi
-    
+
     if [[ -n "$blocked_domains" ]]; then
-        echo "BLOCKED_DOMAINS=[\"$(echo "$blocked_domains" | sed 's/,/","/g')\"]" >> "$CONFIG_FILE"
+        local json_array=$(generate_json_array "$blocked_domains" "域名黑名单")
+        if [[ $? -eq 0 ]] && [[ -n "$json_array" ]]; then
+            echo "BLOCKED_DOMAINS=$json_array" >> "$CONFIG_FILE"
+        fi
     fi
-    
+
     if [[ -n "$allowed_domains" ]]; then
-        echo "ALLOWED_DOMAINS=[\"$(echo "$allowed_domains" | sed 's/,/","/g')\"]" >> "$CONFIG_FILE"
+        local json_array=$(generate_json_array "$allowed_domains" "域名白名单")
+        if [[ $? -eq 0 ]] && [[ -n "$json_array" ]]; then
+            echo "ALLOWED_DOMAINS=$json_array" >> "$CONFIG_FILE"
+        fi
     fi
-    
+
+    if [[ -n "$allowed_origins" ]]; then
+        local json_array=$(generate_json_array "$allowed_origins" "来源白名单")
+        if [[ $? -eq 0 ]] && [[ -n "$json_array" ]]; then
+            echo "ALLOWED_ORIGINS=$json_array" >> "$CONFIG_FILE"
+        fi
+    fi
+
+    if [[ -n "$log_webhook" ]]; then
+        echo "LOG_WEBHOOK=$log_webhook" >> "$CONFIG_FILE"
+    fi
+
     print_status "success" "安全配置已更新"
     print_status "warning" "请重启服务以应用更改"
+}
+
+# 重置统计数据
+reset_stats() {
+    if [[ ! -f "$CONFIG_FILE" ]]; then
+        print_status "error" "配置文件不存在"
+        return 1
+    fi
+
+    local port=$(grep "^PORT=" "$CONFIG_FILE" | cut -d'=' -f2 2>/dev/null)
+    local api_key=$(grep "^API_KEY=" "$CONFIG_FILE" | cut -d'=' -f2 2>/dev/null)
+
+    if [[ -z "$port" ]]; then
+        print_status "error" "无法获取端口信息"
+        return 1
+    fi
+
+    if [[ -z "$api_key" ]]; then
+        print_status "error" "未设置API密钥，无法重置统计数据"
+        return 1
+    fi
+
+    if ! systemctl is-active --quiet "$SERVICE_NAME"; then
+        print_status "error" "服务未运行"
+        return 1
+    fi
+
+    print_status "warning" "确认要重置所有统计数据吗？此操作不可恢复。"
+    read -p "输入 'yes' 确认重置: " confirm
+
+    if [[ "$confirm" != "yes" ]]; then
+        print_status "info" "操作已取消"
+        return 0
+    fi
+
+    print_status "info" "正在重置统计数据..."
+    local reset_response=$(curl -s --connect-timeout 5 --max-time 10 "http://localhost:$port/_api/reset-stats?key=$api_key" 2>/dev/null)
+
+    if [[ $? -eq 0 ]] && echo "$reset_response" | grep -q '"success":true'; then
+        print_status "success" "统计数据已重置"
+    else
+        print_status "error" "重置失败: $(echo "$reset_response" | grep -o '"message":"[^"]*"' | cut -d'"' -f4 2>/dev/null || echo "未知错误")"
+    fi
 }
 
 # 直接编辑配置文件
@@ -1605,7 +1846,8 @@ service_diagnosis() {
         local health_url="http://localhost:$port/health"
 
         print_status "info" "测试基础健康检查..."
-        local response=$(curl -s -w "%{http_code}" -o /tmp/health_check.json --connect-timeout 5 "$health_url" 2>/dev/null)
+        local temp_health_file=$(mktemp)
+        local response=$(curl -s -w "%{http_code}" -o "$temp_health_file" --connect-timeout 5 "$health_url" 2>/dev/null)
 
         if [[ "$response" == "200" ]]; then
             print_status "success" "基础健康检查通过"
@@ -1617,7 +1859,8 @@ service_diagnosis() {
         if [[ -n "$api_key" ]]; then
             local api_url="http://localhost:$port/_api/health?key=$api_key"
             print_status "info" "测试管理API..."
-            response=$(curl -s -w "%{http_code}" -o /tmp/api_check.json --connect-timeout 5 "$api_url" 2>/dev/null)
+            local temp_api_file=$(mktemp)
+            response=$(curl -s -w "%{http_code}" -o "$temp_api_file" --connect-timeout 5 "$api_url" 2>/dev/null)
 
             if [[ "$response" == "200" ]]; then
                 print_status "success" "管理API检查通过"
@@ -1632,21 +1875,22 @@ service_diagnosis() {
                 if [[ "$enable_stats" == "true" ]]; then
                     print_status "info" "测试统计API..."
                     local stats_url="http://localhost:$port/_api/stats?key=$api_key"
-                    local stats_response=$(curl -s -w "%{http_code}" -o /tmp/stats_check.json --connect-timeout 5 "$stats_url" 2>/dev/null)
+                    local temp_stats_file=$(mktemp)
+                    local stats_response=$(curl -s -w "%{http_code}" -o "$temp_stats_file" --connect-timeout 5 "$stats_url" 2>/dev/null)
 
                     if [[ "$stats_response" == "200" ]]; then
                         print_status "success" "统计API检查通过"
-                        if [[ -f /tmp/stats_check.json ]]; then
+                        if [[ -f "$temp_stats_file" ]]; then
                             echo
                             print_status "info" "统计数据预览:"
                             if command -v jq &> /dev/null; then
-                                echo "总请求数: $(cat /tmp/stats_check.json | jq -r '.stats.totalRequests // "0"')"
-                                echo "成功请求数: $(cat /tmp/stats_check.json | jq -r '.stats.successfulRequests // "0"')"
+                                echo "总请求数: $(cat "$temp_stats_file" | jq -r '.stats.totalRequests // "0"')"
+                                echo "成功请求数: $(cat "$temp_stats_file" | jq -r '.stats.successfulRequests // "0"')"
                             elif command -v python3 &> /dev/null; then
-                                echo "总请求数: $(cat /tmp/stats_check.json | python3 -c "import sys,json; data=json.load(sys.stdin); print(data.get('stats',{}).get('totalRequests',0))" 2>/dev/null || echo "0")"
+                                echo "总请求数: $(cat "$temp_stats_file" | python3 -c "import sys,json; data=json.load(sys.stdin); print(data.get('stats',{}).get('totalRequests',0))" 2>/dev/null || echo "0")"
                             fi
                         fi
-                        rm -f /tmp/stats_check.json
+                        rm -f "$temp_stats_file"
                     else
                         print_status "warning" "统计API检查失败 (HTTP: $stats_response)"
                     fi
@@ -1657,7 +1901,7 @@ service_diagnosis() {
         fi
 
         # 清理临时文件
-        rm -f /tmp/health_check.json /tmp/api_check.json
+        rm -f "$temp_health_file" "$temp_api_file" 2>/dev/null
     fi
 
     echo
@@ -1731,7 +1975,8 @@ health_check() {
     # 检查API响应
     print_status "info" "检查API响应..."
     local health_url="http://localhost:$port/health"
-    local response=$(curl -s -w "%{http_code}" -o /tmp/health_response.json --connect-timeout 10 --max-time 30 "$health_url" 2>/dev/null)
+    local temp_health_response=$(mktemp)
+    local response=$(curl -s -w "%{http_code}" -o "$temp_health_response" --connect-timeout 10 --max-time 30 "$health_url" 2>/dev/null)
 
     if [[ "$response" == "200" ]]; then
         print_status "success" "基础健康检查通过"
@@ -1742,38 +1987,38 @@ health_check() {
             health_url="${health_url}?key=$api_key"
         fi
 
-        response=$(curl -s -w "%{http_code}" -o /tmp/health_response.json --connect-timeout 10 --max-time 30 "$health_url" 2>/dev/null)
+        response=$(curl -s -w "%{http_code}" -o "$temp_health_response" --connect-timeout 10 --max-time 30 "$health_url" 2>/dev/null)
     fi
 
     if [[ "$response" == "200" ]]; then
         print_status "success" "服务健康检查通过"
 
         # 显示健康检查响应
-        if [[ -f /tmp/health_response.json ]] && [[ -s /tmp/health_response.json ]]; then
+        if [[ -f "$temp_health_response" ]] && [[ -s "$temp_health_response" ]]; then
             echo
             print_status "info" "健康检查响应:"
             if command -v jq &> /dev/null; then
-                jq . /tmp/health_response.json 2>/dev/null || cat /tmp/health_response.json
+                jq . "$temp_health_response" 2>/dev/null || cat "$temp_health_response"
             elif command -v python3 &> /dev/null; then
-                python3 -m json.tool /tmp/health_response.json 2>/dev/null || cat /tmp/health_response.json
+                python3 -m json.tool "$temp_health_response" 2>/dev/null || cat "$temp_health_response"
             else
-                cat /tmp/health_response.json
+                cat "$temp_health_response"
             fi
         fi
 
-        rm -f /tmp/health_response.json
+        rm -f "$temp_health_response"
         return $EXIT_SUCCESS
     else
         print_status "error" "健康检查失败 (HTTP: $response)"
         print_status "info" "测试的URL: $health_url"
 
         # 显示错误响应
-        if [[ -f /tmp/health_response.json ]] && [[ -s /tmp/health_response.json ]]; then
+        if [[ -f "$temp_health_response" ]] && [[ -s "$temp_health_response" ]]; then
             print_status "info" "错误响应:"
-            cat /tmp/health_response.json
+            cat "$temp_health_response"
         fi
 
-        rm -f /tmp/health_response.json
+        rm -f "$temp_health_response"
 
         # 提供故障排除建议
         echo

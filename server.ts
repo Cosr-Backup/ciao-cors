@@ -1,7 +1,7 @@
 /**
  * CIAO-CORS - 高性能CORS代理服务
  * 支持环境变量配置、请求限制、黑白名单、统计等功能
- * 版本: v1.2.0
+ * 版本: v1.2.5
  * 作者: bestZwei
  * 项目: https://github.com/bestZwei/ciao-cors
  */
@@ -39,23 +39,56 @@ function loadConfig(): Config {
     }
   };
 
-  return {
-    port: parseInt(Deno.env.get('PORT') || '3000'),
+  // 验证和清理配置值
+  const validatePort = (port: number): number => {
+    if (isNaN(port) || port < 1 || port > 65535) {
+      console.warn(`Invalid port ${port}, using default 3000`);
+      return 3000;
+    }
+    return port;
+  };
+
+  const validatePositiveInt = (value: number, defaultValue: number, name: string): number => {
+    if (isNaN(value) || value < 0) {
+      console.warn(`Invalid ${name} ${value}, using default ${defaultValue}`);
+      return defaultValue;
+    }
+    return value;
+  };
+
+  const config = {
+    port: validatePort(parseInt(Deno.env.get('PORT') || '3000')),
     allowedOrigins: parseArray(Deno.env.get('ALLOWED_ORIGINS')),
     blockedIPs: parseArray(Deno.env.get('BLOCKED_IPS')),
     blockedDomains: parseArray(Deno.env.get('BLOCKED_DOMAINS')),
     allowedDomains: parseArray(Deno.env.get('ALLOWED_DOMAINS')),
-    rateLimit: parseInt(Deno.env.get('RATE_LIMIT') || '60'),
-    rateLimitWindow: parseInt(Deno.env.get('RATE_LIMIT_WINDOW') || '60000'),
-    concurrentLimit: parseInt(Deno.env.get('CONCURRENT_LIMIT') || '10'),
-    totalConcurrentLimit: parseInt(Deno.env.get('TOTAL_CONCURRENT_LIMIT') || '1000'),
-    apiKey: Deno.env.get('API_KEY'),
+    rateLimit: validatePositiveInt(parseInt(Deno.env.get('RATE_LIMIT') || '60'), 60, 'RATE_LIMIT'),
+    rateLimitWindow: validatePositiveInt(parseInt(Deno.env.get('RATE_LIMIT_WINDOW') || '60000'), 60000, 'RATE_LIMIT_WINDOW'),
+    concurrentLimit: validatePositiveInt(parseInt(Deno.env.get('CONCURRENT_LIMIT') || '10'), 10, 'CONCURRENT_LIMIT'),
+    totalConcurrentLimit: validatePositiveInt(parseInt(Deno.env.get('TOTAL_CONCURRENT_LIMIT') || '1000'), 1000, 'TOTAL_CONCURRENT_LIMIT'),
+    apiKey: Deno.env.get('API_KEY')?.trim() || undefined,
     enableStats: Deno.env.get('ENABLE_STATS') !== 'false',
     enableLogging: Deno.env.get('ENABLE_LOGGING') !== 'false',
-    logWebhook: Deno.env.get('LOG_WEBHOOK'),
-    maxUrlLength: parseInt(Deno.env.get('MAX_URL_LENGTH') || '2048'),
-    timeout: parseInt(Deno.env.get('TIMEOUT') || '30000')
+    logWebhook: Deno.env.get('LOG_WEBHOOK')?.trim() || undefined,
+    maxUrlLength: validatePositiveInt(parseInt(Deno.env.get('MAX_URL_LENGTH') || '2048'), 2048, 'MAX_URL_LENGTH'),
+    timeout: validatePositiveInt(parseInt(Deno.env.get('TIMEOUT') || '30000'), 30000, 'TIMEOUT')
   };
+
+  // 验证数组配置的有效性
+  const validateArrayConfig = (arr: string[], name: string) => {
+    if (arr.some(item => typeof item !== 'string' || item.trim() === '')) {
+      console.warn(`Warning: ${name} contains invalid entries, filtering out empty values`);
+      return arr.filter(item => typeof item === 'string' && item.trim() !== '');
+    }
+    return arr;
+  };
+
+  config.allowedOrigins = validateArrayConfig(config.allowedOrigins, 'ALLOWED_ORIGINS');
+  config.blockedIPs = validateArrayConfig(config.blockedIPs, 'BLOCKED_IPS');
+  config.blockedDomains = validateArrayConfig(config.blockedDomains, 'BLOCKED_DOMAINS');
+  config.allowedDomains = validateArrayConfig(config.allowedDomains, 'ALLOWED_DOMAINS');
+
+  return config;
 }
 
 // ==================== 限制和安全模块 ====================
@@ -63,13 +96,14 @@ class RateLimiter {
   private requests: Map<string, number[]> = new Map();
   private windowMs: number;
   private maxRequests: number;
+  private cleanupTimer: number | null = null;
 
   constructor(windowMs: number, maxRequests: number) {
     this.windowMs = windowMs;
     this.maxRequests = maxRequests;
-    
+
     // 定期清理过期记录
-    setInterval(() => this.cleanup(), Math.min(windowMs, 60000));
+    this.cleanupTimer = setInterval(() => this.cleanup(), Math.min(windowMs, 60000)) as unknown as number;
   }
 
   checkLimit(ip: string): boolean {
@@ -98,6 +132,15 @@ class RateLimiter {
         this.requests.set(ip, validRequests);
       }
     }
+  }
+
+  // 清理资源
+  destroy(): void {
+    if (this.cleanupTimer !== null) {
+      clearInterval(this.cleanupTimer);
+      this.cleanupTimer = null;
+    }
+    this.requests.clear();
   }
 
   getStats(): { totalIPs: number; totalRequests: number } {
@@ -408,6 +451,7 @@ class StatsCollector {
   private responseTimes: number[] = [];
   // 添加存储周期性统计的数组
   private hourlyStats: { timestamp: number; requests: number }[] = [];
+  private lastHourRequestCount: number = 0;
 
   constructor() {
     this.stats = {
@@ -456,11 +500,20 @@ class StatsCollector {
 
   // 记录每小时统计数据
   private recordHourlyStat(): void {
+    const now = Date.now();
+    const currentRequests = this.stats.totalRequests;
+
+    // 计算这一小时的增量请求数
+    const hourlyIncrement = currentRequests - this.lastHourRequestCount;
+
     this.hourlyStats.push({
-      timestamp: Date.now(),
-      requests: this.stats.totalRequests
+      timestamp: now,
+      requests: Math.max(0, hourlyIncrement) // 确保不为负数
     });
-    
+
+    // 更新上一小时的请求计数
+    this.lastHourRequestCount = currentRequests;
+
     // 保留最近24小时的数据
     if (this.hourlyStats.length > 24) {
       this.hourlyStats.shift();
@@ -643,16 +696,17 @@ class CiaoCorsServer {
   // 添加简单缓存
   private responseCache: Map<string, { response: Response, timestamp: number }> = new Map();
   private cacheTTL = 60000; // 1分钟缓存
-  
+  private cacheCleanupTimer: number | null = null;
+
   constructor() {
     this.config = loadConfig();
     this.rateLimiter = new RateLimiter(this.config.rateLimitWindow, this.config.rateLimit);
     this.concurrencyLimiter = new ConcurrencyLimiter(this.config.concurrentLimit, this.config.totalConcurrentLimit);
     this.statsCollector = new StatsCollector();
     this.logger = new Logger(this.config.enableLogging, this.config.logWebhook);
-    
+
     // 定期清理缓存
-    setInterval(() => this.cleanupCache(), 30000);
+    this.cacheCleanupTimer = setInterval(() => this.cleanupCache(), 30000) as unknown as number;
   }
 
   async handleRequest(request: Request): Promise<Response> {
@@ -682,7 +736,7 @@ class CiaoCorsServer {
         return new Response(JSON.stringify({
           status: 'ok',
           timestamp: new Date().toISOString(),
-          version: '1.2.0'
+          version: '1.2.5'
         }), {
           headers: { 'Content-Type': 'application/json' }
         });
@@ -713,11 +767,12 @@ class CiaoCorsServer {
 
       let response: Response;
       let success = false;
-      
+
       try {
         // 安全验证
         const validation = validateRequest(targetPath, clientIP, this.config, origin || undefined);
         if (!validation.valid) {
+          this.concurrencyLimiter.release(clientIP);
           return this.createErrorResponse(403, validation.reason || 'Request blocked');
         }
 
@@ -764,6 +819,7 @@ class CiaoCorsServer {
           } catch (proxyError) {
             // 处理代理请求错误
             if (proxyError instanceof Error && proxyError.message === 'Request body too large') {
+              this.concurrencyLimiter.release(clientIP);
               return this.createErrorResponse(413, 'Request body too large');
             }
             throw proxyError; // 重新抛出其他错误
@@ -787,20 +843,23 @@ class CiaoCorsServer {
       }
 
     } catch (error) {
+      // 确保释放并发限制
+      this.concurrencyLimiter.release(clientIP);
+
       // 改进错误处理和日志
-      this.logger.logError(error as Error, { 
-        url: request.url, 
-        ip: clientIP, 
+      this.logger.logError(error as Error, {
+        url: request.url,
+        ip: clientIP,
         requestId: requestId,
-        timestamp: new Date().toISOString() 
+        timestamp: new Date().toISOString()
       });
-      
+
       if (this.config.enableStats) {
         this.statsCollector.recordRequest(clientIP, 'error', 500, Date.now() - startTime, false);
       }
-      
-      return this.createErrorResponse(500, 'Proxy error', { 
-        message: error instanceof Error ? error.message : 'Unknown error' 
+
+      return this.createErrorResponse(500, 'Proxy error', {
+        message: error instanceof Error ? error.message : 'Unknown error'
       });
     }
   }
@@ -872,7 +931,7 @@ class CiaoCorsServer {
             size: this.responseCache.size
           },
           uptime: Date.now() - stats.startTime,
-          version: '1.2.0'
+          version: '1.2.5'
         }, null, 2), {
           headers: { 'Content-Type': 'application/json' }
         });
@@ -881,7 +940,7 @@ class CiaoCorsServer {
         return new Response(JSON.stringify({
           status: 'healthy',
           timestamp: new Date().toISOString(),
-          version: '1.2.0',
+          version: '1.2.5',
           memory: Deno.memoryUsage ? {
             rss: Deno.memoryUsage().rss,
             heapTotal: Deno.memoryUsage().heapTotal,
@@ -923,6 +982,64 @@ class CiaoCorsServer {
           headers: { 'Content-Type': 'application/json' }
         });
 
+      case 'reload-config':
+        try {
+          const newConfig = loadConfig();
+
+          // 验证新配置的有效性
+          if (newConfig.port < 1 || newConfig.port > 65535) {
+            throw new Error(`Invalid port: ${newConfig.port}`);
+          }
+          if (newConfig.rateLimit < 0 || newConfig.concurrentLimit < 0) {
+            throw new Error('Rate limit and concurrent limit must be non-negative');
+          }
+
+          // 清理旧的资源
+          this.logger.cleanup();
+          this.rateLimiter.destroy();
+
+          // 更新配置
+          this.config = newConfig;
+
+          // 重新初始化所有组件
+          this.rateLimiter = new RateLimiter(newConfig.rateLimitWindow, newConfig.rateLimit);
+          this.concurrencyLimiter = new ConcurrencyLimiter(newConfig.concurrentLimit, newConfig.totalConcurrentLimit);
+          this.logger = new Logger(newConfig.enableLogging, newConfig.logWebhook);
+
+          return new Response(JSON.stringify({
+            success: true,
+            message: 'Configuration reloaded successfully',
+            timestamp: new Date().toISOString(),
+            config: {
+              port: newConfig.port,
+              enableStats: newConfig.enableStats,
+              enableLogging: newConfig.enableLogging,
+              rateLimit: newConfig.rateLimit,
+              concurrentLimit: newConfig.concurrentLimit,
+              totalConcurrentLimit: newConfig.totalConcurrentLimit,
+              maxUrlLength: newConfig.maxUrlLength,
+              timeout: newConfig.timeout,
+              logWebhook: newConfig.logWebhook ? '***' : undefined,
+              allowedOrigins: newConfig.allowedOrigins.length,
+              allowedDomains: newConfig.allowedDomains.length,
+              blockedIPs: newConfig.blockedIPs.length,
+              blockedDomains: newConfig.blockedDomains.length
+            }
+          }), {
+            headers: { 'Content-Type': 'application/json' }
+          });
+        } catch (error) {
+          return new Response(JSON.stringify({
+            success: false,
+            error: 'Failed to reload configuration',
+            message: error instanceof Error ? error.message : 'Unknown error',
+            timestamp: new Date().toISOString()
+          }), {
+            status: 500,
+            headers: { 'Content-Type': 'application/json' }
+          });
+        }
+
       case 'performance':
         if (!this.config.enableStats) {
           return this.createErrorResponse(404, 'Stats disabled');
@@ -934,7 +1051,7 @@ class CiaoCorsServer {
 
       case 'version':
         return new Response(JSON.stringify({
-          version: '1.2.0',
+          version: '1.2.5',
           runtime: `Deno ${Deno.version.deno}`,
           typescript: Deno.version.typescript,
           v8: Deno.version.v8
@@ -1007,9 +1124,43 @@ class CiaoCorsServer {
            'unknown';
   }
   
+  // 重载配置
+  reloadConfig(): void {
+    try {
+      const newConfig = loadConfig();
+
+      // 验证新配置
+      if (newConfig.port < 1 || newConfig.port > 65535) {
+        throw new Error(`Invalid port: ${newConfig.port}`);
+      }
+
+      // 清理旧资源
+      this.logger.cleanup();
+      this.rateLimiter.destroy();
+
+      // 更新配置
+      this.config = newConfig;
+
+      // 重新初始化组件
+      this.rateLimiter = new RateLimiter(newConfig.rateLimitWindow, newConfig.rateLimit);
+      this.concurrencyLimiter = new ConcurrencyLimiter(newConfig.concurrentLimit, newConfig.totalConcurrentLimit);
+      this.logger = new Logger(newConfig.enableLogging, newConfig.logWebhook);
+
+      console.log("✅ Configuration reloaded successfully");
+    } catch (error) {
+      console.error("❌ Failed to reload configuration:", error);
+      throw error;
+    }
+  }
+
   // 清理资源
   cleanup(): void {
     this.logger.cleanup();
+    this.rateLimiter.destroy();
+    if (this.cacheCleanupTimer !== null) {
+      clearInterval(this.cacheCleanupTimer);
+      this.cacheCleanupTimer = null;
+    }
     this.responseCache.clear();
   }
 }
@@ -1025,7 +1176,7 @@ async function main() {
 
   console.log(`
 ====================================================
-  🚀 CIAO-CORS Server v1.2.0
+  🚀 CIAO-CORS Server v1.2.5
 ====================================================
   📌 Port: ${config.port}
   📊 Stats: ${config.enableStats ? 'enabled' : 'disabled'}
@@ -1055,6 +1206,15 @@ async function main() {
     try {
       Deno.addSignalListener("SIGINT", handleShutdown);
       Deno.addSignalListener("SIGTERM", handleShutdown);
+      // 添加HUP信号处理（用于配置重载）
+      Deno.addSignalListener("SIGHUP", () => {
+        console.log("🔄 Received SIGHUP, reloading configuration...");
+        try {
+          server.reloadConfig();
+        } catch (error) {
+          console.error("❌ Failed to reload configuration:", error);
+        }
+      });
     } catch (e) {
       console.warn("无法注册信号处理程序:", e);
     }
@@ -1064,9 +1224,19 @@ async function main() {
 
   // 启动HTTP服务器
   try {
-    await Deno.serve({ port: config.port }, handler);
+    console.log(`🌐 Starting server on port ${config.port}...`);
+    await Deno.serve({
+      port: config.port,
+      onError: (error) => {
+        console.error('Server error:', error);
+        return new Response('Internal Server Error', { status: 500 });
+      }
+    }, handler);
   } catch (error) {
     console.error('Failed to start server:', error);
+    if (error instanceof Error && error.message.includes('Address already in use')) {
+      console.error(`Port ${config.port} is already in use. Please check if another service is running on this port.`);
+    }
     Deno.exit(1);
   }
 }
