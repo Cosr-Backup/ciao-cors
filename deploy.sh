@@ -225,29 +225,17 @@ check_requirements() {
       fi
   fi
 
-  # 安装可选的网络工具
-  if [[ ${#missing_optional[@]} -gt 0 ]]; then
-      print_status "info" "缺少网络工具: ${missing_optional[*]}"
-      print_status "info" "尝试安装网络工具以改善监控功能..."
 
-      if command -v yum &> /dev/null; then
-          yum install -y net-tools iproute lsof 2>/dev/null || print_status "warning" "网络工具安装失败"
-      elif command -v apt &> /dev/null; then
-          apt install -y net-tools iproute2 lsof 2>/dev/null || print_status "warning" "网络工具安装失败"
-      elif command -v dnf &> /dev/null; then
-          dnf install -y net-tools iproute lsof 2>/dev/null || print_status "warning" "网络工具安装失败"
-      fi
-  fi
 
   # 检查防火墙工具
   if ! command -v firewall-cmd &> /dev/null && ! command -v ufw &> /dev/null && ! command -v iptables &> /dev/null; then
       print_status "warning" "未找到防火墙管理工具，尝试安装firewalld..."
       if command -v yum &> /dev/null; then
-          yum install -y firewalld && systemctl enable firewalld
+          yum install -y firewalld 2>/dev/null && systemctl enable firewalld 2>/dev/null || print_status "warning" "firewalld安装失败"
       elif command -v apt &> /dev/null; then
-          apt install -y firewalld && systemctl enable firewalld
+          apt install -y firewalld 2>/dev/null && systemctl enable firewalld 2>/dev/null || print_status "warning" "firewalld安装失败"
       elif command -v dnf &> /dev/null; then
-          dnf install -y firewalld && systemctl enable firewalld
+          dnf install -y firewalld 2>/dev/null && systemctl enable firewalld 2>/dev/null || print_status "warning" "firewalld安装失败"
       fi
   fi
 
@@ -443,13 +431,30 @@ download_project() {
 
         if curl -fsSL --connect-timeout 30 --max-time 120 "$GITHUB_REPO/server.ts" -o server.ts.tmp; then
             # 验证下载的文件
-            if [[ -s server.ts.tmp ]] && head -1 server.ts.tmp | grep -q "^/\*\*"; then
-                mv server.ts.tmp server.ts
-                chmod +x server.ts
-                print_status "success" "项目文件下载成功"
-                return $EXIT_SUCCESS
+            if [[ -s server.ts.tmp ]]; then
+                # 检查文件头部是否包含预期的注释
+                if head -5 server.ts.tmp | grep -q "CIAO-CORS"; then
+                    # 检查文件大小是否合理 (应该大于10KB小于1MB)
+                    local file_size=$(stat -c%s server.ts.tmp 2>/dev/null || wc -c < server.ts.tmp)
+                    if [[ $file_size -gt 10240 ]] && [[ $file_size -lt 1048576 ]]; then
+                        # 检查是否包含关键函数
+                        if grep -q "class CiaoCorsServer" server.ts.tmp && grep -q "export default" server.ts.tmp; then
+                            mv server.ts.tmp server.ts
+                            chmod +x server.ts
+                            print_status "success" "项目文件下载成功"
+                            return $EXIT_SUCCESS
+                        else
+                            print_status "warning" "下载的文件缺少关键组件，重试..."
+                        fi
+                    else
+                        print_status "warning" "下载的文件大小异常 (${file_size} bytes)，重试..."
+                    fi
+                else
+                    print_status "warning" "下载的文件格式不正确，重试..."
+                fi
+                rm -f server.ts.tmp
             else
-                print_status "warning" "下载的文件似乎不完整，重试..."
+                print_status "warning" "下载的文件为空，重试..."
                 rm -f server.ts.tmp
             fi
         else
@@ -679,12 +684,26 @@ create_config() {
         IFS=',' read -ra IP_ARRAY <<< "$blocked_ips"
         for ip in "${IP_ARRAY[@]}"; do
             ip=$(echo "$ip" | xargs)  # 去除空格
-            if ! [[ "$ip" =~ ^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$ ]]; then
+            # 验证IPv4地址格式
+            if [[ "$ip" =~ ^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$ ]]; then
+                # 进一步验证每个数字段是否在0-255范围内
+                IFS='.' read -ra ADDR <<< "$ip"
+                local valid=true
+                for octet in "${ADDR[@]}"; do
+                    if [[ $octet -lt 0 ]] || [[ $octet -gt 255 ]]; then
+                        valid=false
+                        break
+                    fi
+                done
+                if [[ "$valid" != "true" ]]; then
+                    invalid_ips="$invalid_ips $ip"
+                fi
+            else
                 invalid_ips="$invalid_ips $ip"
             fi
         done
         if [[ -n "$invalid_ips" ]]; then
-            print_status "warning" "以下IP地址格式可能不正确:$invalid_ips"
+            print_status "warning" "以下IP地址格式不正确:$invalid_ips"
             read -p "是否继续? (y/N): " continue_config
             if [[ ! "$continue_config" =~ ^[Yy]$ ]]; then
                 return $EXIT_CONFIG_ERROR
@@ -810,10 +829,20 @@ configure_firewall() {
         "ufw")
             # 检查ufw状态
             if ! ufw status | grep -q "Status: active"; then
-                print_status "warning" "ufw未启用，是否启用? (y/N): "
-                read -p "" enable_ufw
+                print_status "warning" "ufw未启用"
+                read -p "是否启用ufw防火墙? (y/N): " enable_ufw
                 if [[ "$enable_ufw" =~ ^[Yy]$ ]]; then
+                    # 先允许SSH端口，防止SSH连接断开
+                    local ssh_port=$(ss -tlnp 2>/dev/null | grep ':22 ' | head -1 | awk '{print $4}' | cut -d: -f2)
+                    if [[ -z "$ssh_port" ]]; then
+                        ssh_port="22"
+                    fi
+                    print_status "info" "首先允许SSH端口 $ssh_port 以防止连接断开"
+                    ufw allow "$ssh_port/tcp" 2>/dev/null || true
+
+                    # 启用防火墙
                     ufw --force enable
+                    print_status "success" "ufw已启用"
                 else
                     print_status "info" "跳过ufw配置"
                     return $EXIT_SUCCESS
@@ -989,13 +1018,23 @@ start_service() {
     # 检查端口是否被其他进程占用
     local port=$(grep "^PORT=" "$CONFIG_FILE" | cut -d'=' -f2 2>/dev/null)
     if [[ -n "$port" ]] && check_port_usage "$port"; then
-        local occupying_process=$(lsof -i ":$port" 2>/dev/null | tail -n +2 | awk '{print $1, $2}' | head -1)
-        if [[ -n "$occupying_process" ]] && [[ ! "$occupying_process" =~ deno ]]; then
+        local occupying_process=""
+        if command -v lsof &> /dev/null; then
+            occupying_process=$(lsof -i ":$port" 2>/dev/null | tail -n +2 | awk '{print $1, $2}' | head -1)
+        elif command -v ss &> /dev/null; then
+            occupying_process=$(ss -tlnp | grep ":$port " | awk '{print $6}' | head -1)
+        elif command -v netstat &> /dev/null; then
+            occupying_process=$(netstat -tlnp 2>/dev/null | grep ":$port " | awk '{print $7}' | head -1)
+        fi
+
+        if [[ -n "$occupying_process" ]] && [[ ! "$occupying_process" =~ (deno|ciao-cors) ]]; then
             print_status "warning" "端口 $port 被其他进程占用: $occupying_process"
             read -p "是否强制启动? (y/N): " force_start
             if [[ ! "$force_start" =~ ^[Yy]$ ]]; then
                 return $EXIT_GENERAL_ERROR
             fi
+        elif [[ -n "$occupying_process" ]] && [[ "$occupying_process" =~ (deno|ciao-cors) ]]; then
+            print_status "info" "端口 $port 已被CIAO-CORS服务占用，这是正常的"
         fi
     fi
 
@@ -1938,37 +1977,49 @@ create_swap() {
   # 检查内存大小和已有SWAP
   local mem_total=$(free -m | awk '/^Mem:/{print $2}')
   local swap_total=$(free -m | awk '/^Swap:/{print $2}')
-  
+
   if [[ $mem_total -ge 2048 ]]; then
     print_status "info" "内存大于2GB (${mem_total}MB)，无需创建SWAP"
     return 0
   fi
-  
+
   if [[ $swap_total -gt 0 ]]; then
     print_status "info" "已存在${swap_total}MB SWAP空间，无需创建"
     return 0
   fi
-  
-  print_status "info" "创建SWAP空间..."
-  
-  # 计算SWAP大小 (内存的2倍，最大4GB)
+
+  # 检查磁盘空间
+  local free_space=$(df -m / | awk 'NR==2 {print $4}')
   local swap_size=$((mem_total * 2))
   if [[ $swap_size -gt 4096 ]]; then
     swap_size=4096
   fi
-  
-  # 创建SWAP文件
-  dd if=/dev/zero of=/swapfile bs=1M count=$swap_size
-  chmod 600 /swapfile
-  mkswap /swapfile
-  swapon /swapfile
-  
-  # 添加到fstab
-  if ! grep -q "/swapfile" /etc/fstab; then
-    echo "/swapfile swap swap defaults 0 0" >> /etc/fstab
+
+  if [[ $free_space -lt $((swap_size + 500)) ]]; then
+    print_status "warning" "磁盘空间不足，无法创建${swap_size}MB SWAP空间"
+    return 1
   fi
-  
-  print_status "success" "创建了${swap_size}MB SWAP空间"
+
+  print_status "info" "创建SWAP空间..."
+
+  # 安全地创建SWAP文件
+  if fallocate -l "${swap_size}M" /swapfile 2>/dev/null || dd if=/dev/zero of=/swapfile bs=1M count=$swap_size 2>/dev/null; then
+    chmod 600 /swapfile
+    if mkswap /swapfile && swapon /swapfile; then
+      # 添加到fstab
+      if ! grep -q "/swapfile" /etc/fstab; then
+        echo "/swapfile swap swap defaults 0 0" >> /etc/fstab
+      fi
+      print_status "success" "创建了${swap_size}MB SWAP空间"
+    else
+      print_status "error" "SWAP文件创建失败"
+      rm -f /swapfile
+      return 1
+    fi
+  else
+    print_status "error" "无法创建SWAP文件"
+    return 1
+  fi
 }
 
 # ==================== 卸载函数 ====================
@@ -2093,14 +2144,28 @@ uninstall_service() {
     if [[ -n "$port" ]]; then
         read -p "是否关闭防火墙端口 $port? (y/N): " close_port
         if [[ "$close_port" =~ ^[Yy]$ ]]; then
-            if command -v firewall-cmd &> /dev/null; then
-                firewall-cmd --permanent --remove-port="$port/tcp" 2>/dev/null && firewall-cmd --reload 2>/dev/null
-                print_status "info" "firewalld端口已关闭"
-            elif command -v ufw &> /dev/null; then
-                ufw delete allow "$port/tcp" 2>/dev/null
-                print_status "info" "ufw端口已关闭"
+            # 检查是否为SSH端口，避免关闭SSH端口导致连接断开
+            local ssh_ports=("22" "2222" "2022")
+            local is_ssh_port=false
+            for ssh_port in "${ssh_ports[@]}"; do
+                if [[ "$port" == "$ssh_port" ]]; then
+                    is_ssh_port=true
+                    break
+                fi
+            done
+
+            if [[ "$is_ssh_port" == "true" ]]; then
+                print_status "warning" "端口 $port 可能是SSH端口，为安全起见不会关闭"
             else
-                print_status "warning" "请手动关闭防火墙端口 $port"
+                if command -v firewall-cmd &> /dev/null && systemctl is-active --quiet firewalld; then
+                    firewall-cmd --permanent --remove-port="$port/tcp" 2>/dev/null && firewall-cmd --reload 2>/dev/null
+                    print_status "info" "firewalld端口已关闭"
+                elif command -v ufw &> /dev/null; then
+                    ufw delete allow "$port/tcp" 2>/dev/null
+                    print_status "info" "ufw端口已关闭"
+                else
+                    print_status "warning" "请手动关闭防火墙端口 $port"
+                fi
             fi
         fi
     fi

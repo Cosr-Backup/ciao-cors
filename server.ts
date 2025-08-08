@@ -206,9 +206,13 @@ function validateRequest(url: string, ip: string, config: Config, origin?: strin
     /data:/i,
     /vbscript:/i,
     /file:/i,
-    /ftp:/i
+    /ftp:/i,
+    /about:/i,
+    /chrome:/i,
+    /chrome-extension:/i,
+    /moz-extension:/i
   ];
-  
+
   if (maliciousPatterns.some(pattern => pattern.test(url))) {
     return { valid: false, reason: 'Malicious URL pattern' };
   }
@@ -216,6 +220,38 @@ function validateRequest(url: string, ip: string, config: Config, origin?: strin
   // 增强URL安全验证 - 检查是否包含控制字符
   if (/[\u0000-\u001F\u007F-\u009F]/.test(url)) {
     return { valid: false, reason: 'URL contains control characters' };
+  }
+
+  // 检查是否尝试访问内网地址
+  try {
+    const targetUrl = new URL(fixUrl(url));
+    const hostname = targetUrl.hostname.toLowerCase();
+
+    // 检查私有IP地址范围
+    const privateIPPatterns = [
+      /^127\./,           // 127.0.0.0/8 (localhost)
+      /^10\./,            // 10.0.0.0/8
+      /^172\.(1[6-9]|2[0-9]|3[0-1])\./,  // 172.16.0.0/12
+      /^192\.168\./,      // 192.168.0.0/16
+      /^169\.254\./,      // 169.254.0.0/16 (link-local)
+      /^0\./,             // 0.0.0.0/8
+      /^224\./,           // 224.0.0.0/4 (multicast)
+      /^240\./            // 240.0.0.0/4 (reserved)
+    ];
+
+    // 检查特殊域名
+    const restrictedDomains = [
+      'localhost',
+      'metadata.google.internal',
+      '169.254.169.254'  // AWS/GCP metadata service
+    ];
+
+    if (privateIPPatterns.some(pattern => pattern.test(hostname)) ||
+        restrictedDomains.includes(hostname)) {
+      return { valid: false, reason: 'Access to internal/private addresses is not allowed' };
+    }
+  } catch {
+    // URL解析失败已在前面处理
   }
 
   return { valid: true };
@@ -270,29 +306,54 @@ async function processRequestBody(request: Request): Promise<any> {
   }
 
   const contentType = request.headers.get('content-type')?.toLowerCase() || '';
+  const contentLength = request.headers.get('content-length');
+
+  // 检查内容长度限制 (默认最大10MB)
+  const maxBodySize = 10 * 1024 * 1024; // 10MB
+  if (contentLength && parseInt(contentLength) > maxBodySize) {
+    throw new Error('Request body too large');
+  }
 
   try {
     if (contentType.includes('application/json')) {
       // 使用克隆请求防止body被消费后无法再次读取
       const clonedRequest = request.clone();
       try {
-        return JSON.stringify(await clonedRequest.json());
+        const jsonData = await clonedRequest.json();
+        return JSON.stringify(jsonData);
       } catch (e) {
         // JSON解析失败时返回原始文本
-        return await request.text();
+        const text = await request.text();
+        // 检查文本长度
+        if (text.length > maxBodySize) {
+          throw new Error('Request body too large');
+        }
+        return text;
       }
-    } else if (contentType.includes('application/x-www-form-urlencoded') || 
+    } else if (contentType.includes('application/x-www-form-urlencoded') ||
                contentType.includes('multipart/form-data')) {
       return await request.formData();
     } else if (contentType.includes('text/')) {
-      return await request.text();
+      const text = await request.text();
+      if (text.length > maxBodySize) {
+        throw new Error('Request body too large');
+      }
+      return text;
     } else {
       return await request.arrayBuffer();
     }
   } catch (e) {
     // 增加错误日志
     console.error("Error processing request body:", e);
-    return await request.arrayBuffer();
+    if (e instanceof Error && e.message === 'Request body too large') {
+      throw e;
+    }
+    // 对于其他错误，尝试返回arrayBuffer
+    try {
+      return await request.arrayBuffer();
+    } catch {
+      return undefined;
+    }
   }
 }
 
@@ -595,7 +656,7 @@ class CiaoCorsServer {
 
   async handleRequest(request: Request): Promise<Response> {
     // 增加请求ID用于日志追踪
-    const requestId = crypto.randomUUID ? crypto.randomUUID() : `req-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+    const requestId = crypto.randomUUID ? crypto.randomUUID() : `req-${Date.now()}-${Math.random().toString(36).substring(2, 11)}`;
     const startTime = Date.now();
     const clientIP = this.getClientIP(request);
     const origin = request.headers.get('origin');
@@ -661,42 +722,50 @@ class CiaoCorsServer {
 
         // 执行代理请求
         const targetUrl = fixUrl(targetPath);
-        
+
         // 检查GET请求的缓存
         const cacheKey = `${request.method}:${targetUrl}`;
         const cachedResponse = request.method === 'GET' ? this.responseCache.get(cacheKey) : undefined;
-        
+
         if (cachedResponse && (Date.now() - cachedResponse.timestamp < this.cacheTTL)) {
           // 返回缓存的响应副本
           const cachedBody = await cachedResponse.response.clone().arrayBuffer();
           const cachedHeaders = new Headers(cachedResponse.response.headers);
-          
+
           response = new Response(cachedBody, {
             status: cachedResponse.response.status,
             statusText: cachedResponse.response.statusText,
             headers: this.buildCorsHeaders(cachedHeaders, origin || undefined)
           });
-          
+
           success = response.status < 400;
         } else {
-          // 执行新请求
-          const proxyResponse = await performProxy(request, targetUrl, this.config);
-          
-          // 构建响应
-          response = new Response(proxyResponse.body, {
-            status: proxyResponse.status,
-            statusText: proxyResponse.statusText,
-            headers: this.buildCorsHeaders(proxyResponse.headers, origin || undefined)
-          });
-          
-          success = proxyResponse.status < 400;
-          
-          // 缓存GET请求的成功响应
-          if (request.method === 'GET' && success) {
-            this.responseCache.set(cacheKey, {
-              response: response.clone(),
-              timestamp: Date.now()
+          try {
+            // 执行新请求
+            const proxyResponse = await performProxy(request, targetUrl, this.config);
+
+            // 构建响应
+            response = new Response(proxyResponse.body, {
+              status: proxyResponse.status,
+              statusText: proxyResponse.statusText,
+              headers: this.buildCorsHeaders(proxyResponse.headers, origin || undefined)
             });
+
+            success = proxyResponse.status < 400;
+
+            // 缓存GET请求的成功响应
+            if (request.method === 'GET' && success) {
+              this.responseCache.set(cacheKey, {
+                response: response.clone(),
+                timestamp: Date.now()
+              });
+            }
+          } catch (proxyError) {
+            // 处理代理请求错误
+            if (proxyError instanceof Error && proxyError.message === 'Request body too large') {
+              return this.createErrorResponse(413, 'Request body too large');
+            }
+            throw proxyError; // 重新抛出其他错误
           }
         }
         
