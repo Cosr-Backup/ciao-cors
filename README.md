@@ -66,6 +66,18 @@
    - 设置防火墙规则
    - 创建系统服务
 
+#### 脚本功能特性
+
+- **🔒 安全性**: 脚本锁定机制防止并发执行，完整的权限检查
+- **🌐 兼容性**: 支持Ubuntu、Debian、CentOS、RHEL、Fedora等主流发行版
+- **🔧 智能安装**: 自动检测系统架构，支持x86_64和ARM64
+- **📦 依赖管理**: 自动安装必要依赖，智能包管理器检测
+- **🛡️ 防火墙**: 支持firewalld、ufw、iptables多种防火墙
+- **📋 备份恢复**: 自动备份配置和文件，支持一键恢复
+- **🔄 更新维护**: 内置脚本更新、服务更新、系统优化功能
+- **📊 监控诊断**: 健康检查、性能监控、日志分析
+- **🎯 用户友好**: 彩色输出、详细提示、错误处理
+
 ## 高级配置
 
 ### 环境变量
@@ -232,14 +244,68 @@ curl -H "Authorization: Bearer your-api-key" \
 
 ## 故障排除
 
-### 常见问题
+### 部署脚本问题
+
+**Q: 脚本提示"网络连接失败"**
+```bash
+# 检查网络连接
+ping github.com
+ping deno.land
+
+# 检查DNS设置
+cat /etc/resolv.conf
+
+# 临时使用其他DNS
+echo "nameserver 8.8.8.8" > /etc/resolv.conf
+```
+
+**Q: Deno安装失败**
+```bash
+# 手动安装Deno
+curl -fsSL https://deno.land/x/install/install.sh | sh
+export PATH="$HOME/.deno/bin:$PATH"
+sudo ln -sf $HOME/.deno/bin/deno /usr/local/bin/deno
+
+# 验证安装
+deno --version
+```
+
+**Q: 防火墙配置失败**
+```bash
+# 检查防火墙状态
+sudo systemctl status firewalld
+sudo systemctl status ufw
+
+# 手动开放端口
+sudo firewall-cmd --permanent --add-port=3000/tcp
+sudo firewall-cmd --reload
+
+# 或使用ufw
+sudo ufw allow 3000/tcp
+```
+
+**Q: 服务创建失败**
+```bash
+# 检查systemd
+sudo systemctl --version
+
+# 手动重载systemd
+sudo systemctl daemon-reload
+
+# 检查服务文件
+sudo systemctl cat ciao-cors
+```
+
+### 服务运行问题
 
 **Q: 服务启动失败，提示端口被占用**
 ```bash
 # 检查端口占用
 sudo netstat -tlnp | grep :3000
+sudo lsof -i :3000
+
 # 或使用其他端口
-export PORT=8080
+sudo ./deploy.sh  # 选择修改配置 -> 端口号
 ```
 
 **Q: 请求被拒绝，提示Rate limit exceeded**
@@ -295,7 +361,19 @@ curl -H "Authorization: Bearer your-api-key" \
 
 ## 更新日志
 
-### v1.1.0 (2024-01-XX)
+### v1.1.1 (2025-08-08)
+- 🔧 **重大改进**: 完全重构一键部署脚本
+- 🛡️ **安全增强**: 添加脚本锁定机制，防止并发执行
+- 🌐 **网络优化**: 改进网络连接检查和重试机制
+- 🔍 **错误处理**: 完善错误处理和日志记录
+- 📦 **兼容性**: 支持更多Linux发行版和系统架构
+- 🔧 **防火墙**: 支持firewalld、ufw和iptables
+- 📋 **备份**: 自动备份配置和文件
+- 🔄 **更新**: 添加脚本自动更新功能
+- 🎯 **用户体验**: 改进交互界面和错误提示
+- 🧪 **测试**: 添加脚本测试功能
+
+### v1.1.0 
 - ✨ 新增响应缓存功能
 - ✨ 新增小时统计数据
 - ✨ 新增批量日志发送
@@ -303,7 +381,7 @@ curl -H "Authorization: Bearer your-api-key" \
 - ⚡ 优化内存使用和性能
 - 🔧 增加系统优化功能
 
-### v1.0.0 (2024-01-XX)
+### v1.0.0
 - 🎉 首次发布
 - ✨ 基础CORS代理功能
 - ✨ 限流和安全控制
