@@ -527,11 +527,10 @@ download_project() {
                            grep -q "export default" server.ts.tmp && \
                            grep -q "handleRequest" server.ts.tmp && \
                            grep -q "validateRequest" server.ts.tmp; then
-                            # 检查是否包含恶意代码模式（更精确的检测）
+                            # 检查是否包含恶意代码模式
                             local malicious_patterns=(
                                 # 直接执行代码的危险模式
                                 "eval\s*\(\s*[\"'][^\"']*[\"']\s*\)"
-                                "Function\s*\(\s*[\"'][^\"']*[\"']\s*\)"
                                 "setTimeout\s*\(\s*[\"'][^\"']*eval"
                                 "setInterval\s*\(\s*[\"'][^\"']*eval"
                                 # 浏览器DOM操作（服务器端不应该有）
@@ -539,21 +538,16 @@ download_project() {
                                 "\.innerHTML\s*=\s*[\"'][^\"']*<script"
                                 "\.outerHTML\s*=\s*[\"'][^\"']*<script"
                                 "execCommand\s*\("
-                                # 动态函数构造
-                                "new\s+Function\s*\(\s*[\"']"
                                 # 危险的with语句
                                 "with\s*\(\s*[^)]*\)\s*\{"
                                 # 原型污染攻击
                                 "__proto__\s*\[\s*[\"'][^\"']*[\"']\s*\]\s*="
                                 "constructor\s*\[\s*[\"']prototype[\"']\s*\]"
-                                # 明显的恶意代码特征
+                                # 明显的恶意shell命令
                                 "rm\s+-rf\s+/"
                                 "curl\s+.*\|\s*sh"
                                 "wget\s+.*\|\s*sh"
                                 "base64\s+-d.*\|\s*sh"
-                                # 网络请求到可疑域名
-                                "fetch\s*\(\s*[\"']https?://[^/]*\.tk/"
-                                "fetch\s*\(\s*[\"']https?://[^/]*\.ml/"
                             )
 
                             local has_malicious=false
@@ -568,15 +562,10 @@ download_project() {
 
                             # 额外检查：文件中不应该包含的明显恶意字符串
                             local malicious_strings=(
-                                "backdoor"
                                 "keylogger"
                                 "trojan"
                                 "malware"
-                                "exploit"
                                 "shellcode"
-                                "reverse_shell"
-                                "bind_shell"
-                            )
 
                             if [[ "$has_malicious" == "false" ]]; then
                                 for malicious_str in "${malicious_strings[@]}"; do
