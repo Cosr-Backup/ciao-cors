@@ -1418,21 +1418,6 @@ async function main() {
  */
 export default {
   async fetch(request: Request, env: any, ctx: any): Promise<Response> {
-    // 处理预飞请求特殊情况
-    if (request.method === 'OPTIONS') {
-      const headers = new Headers({
-        "Access-Control-Allow-Origin": "*",
-        "Access-Control-Allow-Methods": "GET, POST, PUT, PATCH, DELETE, OPTIONS",
-        "Access-Control-Allow-Headers": request.headers.get('Access-Control-Request-Headers') || 
-          "Accept, Authorization, Cache-Control, Content-Type, DNT, If-Modified-Since, Keep-Alive, Origin, User-Agent, X-Requested-With, Token, x-access-token",
-        "Access-Control-Max-Age": "86400"
-      });
-      return new Response(null, {
-        status: 204,
-        headers
-      });
-    }
-
     // 为Deno Deploy环境设置环境变量
     if (env) {
       for (const [key, value] of Object.entries(env)) {
@@ -1445,7 +1430,7 @@ export default {
     }
 
     const server = new CiaoCorsServer();
-    
+
     // 如果提供了ctx，注册请求完成后的清理函数
     if (ctx && typeof ctx.waitUntil === 'function') {
       ctx.waitUntil(async () => {
@@ -1454,7 +1439,7 @@ export default {
         server.cleanup();
       });
     }
-    
+
     return server.handleRequest(request);
   }
 };
