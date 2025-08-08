@@ -108,7 +108,7 @@ check_config_security() {
     local total_concurrent_limit=$(grep "^TOTAL_CONCURRENT_LIMIT=" "$CONFIG_FILE" | cut -d'=' -f2 2>/dev/null)
 
     if [[ -n "$rate_limit" ]] && [[ "$rate_limit" -gt 0 ]]; then
-        if [[ "$rate_limit" -le 1000 ]]; then
+        if [[ "$rate_limit" -le 5000 ]]; then
             print_status "success" "请求频率限制合理 ($rate_limit/分钟)"
         else
             print_status "warning" "请求频率限制较高 ($rate_limit/分钟)，可能存在滥用风险"

@@ -69,7 +69,7 @@ function loadConfig(): Config {
     blockedIPs: parseArray(Deno.env.get('BLOCKED_IPS')),
     blockedDomains: parseArray(Deno.env.get('BLOCKED_DOMAINS')),
     allowedDomains: parseArray(Deno.env.get('ALLOWED_DOMAINS')),
-    rateLimit: validatePositiveInt(parseInt(Deno.env.get('RATE_LIMIT') || '60'), 60, 'RATE_LIMIT'),
+    rateLimit: validatePositiveInt(parseInt(Deno.env.get('RATE_LIMIT') || '2500'), 2500, 'RATE_LIMIT'),
     rateLimitWindow: validatePositiveInt(parseInt(Deno.env.get('RATE_LIMIT_WINDOW') || '60000'), 60000, 'RATE_LIMIT_WINDOW'),
     concurrentLimit: validatePositiveInt(parseInt(Deno.env.get('CONCURRENT_LIMIT') || '10'), 10, 'CONCURRENT_LIMIT'),
     totalConcurrentLimit: validatePositiveInt(parseInt(Deno.env.get('TOTAL_CONCURRENT_LIMIT') || '1000'), 1000, 'TOTAL_CONCURRENT_LIMIT'),

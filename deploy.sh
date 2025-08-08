@@ -919,8 +919,8 @@ create_config() {
     local rate_limit concurrent_limit total_concurrent_limit
 
     while true; do
-        read -p "请输入请求频率限制 (每分钟) [默认: 60]: " rate_limit
-        rate_limit=${rate_limit:-60}
+        read -p "请输入请求频率限制 (每分钟) [默认: 2500]: " rate_limit
+        rate_limit=${rate_limit:-2500}
         if [[ "$rate_limit" =~ ^[0-9]+$ ]] && [ "$rate_limit" -gt 0 ]; then
             break
         else
