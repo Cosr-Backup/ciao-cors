@@ -349,8 +349,18 @@ export TIMEOUT=60000
 
 **Q: 统计数据不显示**
 ```bash
+# 检查统计功能是否启用
+curl http://localhost:3000/_api/config?key=your-api-key
+
 # 启用统计功能
 export ENABLE_STATS=true
+
+# 或修改配置文件
+sudo sed -i 's/^ENABLE_STATS=.*/ENABLE_STATS=true/' /etc/ciao-cors/config.env
+sudo systemctl restart ciao-cors
+
+# 测试统计功能
+curl https://raw.githubusercontent.com/bestZwei/ciao-cors/main/test-stats.sh | bash
 ```
 
 **Q: 客户端收到CORS错误**

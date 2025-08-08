@@ -630,6 +630,11 @@ create_config() {
     fi
 
     # 统计功能
+    echo
+    print_status "info" "统计功能说明:"
+    echo "  - 启用后可通过管理API查看请求统计"
+    echo "  - 包括请求数、响应时间、热门域名等"
+    echo "  - 默认启用，建议保持开启以便监控"
     read -p "是否启用统计功能? (Y/n): " enable_stats
     enable_stats=${enable_stats:-Y}
     if [[ "$enable_stats" =~ ^[Yy]$ ]]; then
@@ -1620,6 +1625,31 @@ service_diagnosis() {
                     print_status "info" "API响应:"
                     cat /tmp/api_check.json | python3 -m json.tool 2>/dev/null || cat /tmp/api_check.json
                 fi
+
+                # 测试统计API
+                local enable_stats=$(grep "^ENABLE_STATS=" "$CONFIG_FILE" | cut -d'=' -f2 2>/dev/null)
+                if [[ "$enable_stats" == "true" ]]; then
+                    print_status "info" "测试统计API..."
+                    local stats_url="http://localhost:$port/_api/stats?key=$api_key"
+                    local stats_response=$(curl -s -w "%{http_code}" -o /tmp/stats_check.json --connect-timeout 5 "$stats_url" 2>/dev/null)
+
+                    if [[ "$stats_response" == "200" ]]; then
+                        print_status "success" "统计API检查通过"
+                        if [[ -f /tmp/stats_check.json ]]; then
+                            echo
+                            print_status "info" "统计数据预览:"
+                            if command -v jq &> /dev/null; then
+                                echo "总请求数: $(cat /tmp/stats_check.json | jq -r '.stats.totalRequests // "0"')"
+                                echo "成功请求数: $(cat /tmp/stats_check.json | jq -r '.stats.successfulRequests // "0"')"
+                            elif command -v python3 &> /dev/null; then
+                                echo "总请求数: $(cat /tmp/stats_check.json | python3 -c "import sys,json; data=json.load(sys.stdin); print(data.get('stats',{}).get('totalRequests',0))" 2>/dev/null || echo "0")"
+                            fi
+                        fi
+                        rm -f /tmp/stats_check.json
+                    else
+                        print_status "warning" "统计API检查失败 (HTTP: $stats_response)"
+                    fi
+                fi
             else
                 print_status "warning" "管理API检查失败 (HTTP: $response)"
             fi
@@ -1797,16 +1827,191 @@ performance_monitor() {
         fi
     fi
     
-    # 日志统计
+    # 统计数据
     echo
-    print_status "title" "=== 最近请求统计 ==="
-    if [[ -f "$LOG_FILE" ]]; then
-        echo "最近1小时请求数: $(grep "$(date -d '1 hour ago' '+%Y-%m-%d %H')" "$LOG_FILE" 2>/dev/null | wc -l)"
-        echo "最近24小时请求数: $(grep "$(date -d '1 day ago' '+%Y-%m-%d')" "$LOG_FILE" 2>/dev/null | wc -l)"
+    print_status "title" "=== 请求统计 ==="
+
+    # 首先尝试从API获取统计数据
+    local port=$(grep "^PORT=" "$CONFIG_FILE" | cut -d'=' -f2 2>/dev/null)
+    local api_key=$(grep "^API_KEY=" "$CONFIG_FILE" | cut -d'=' -f2 2>/dev/null)
+    local enable_stats=$(grep "^ENABLE_STATS=" "$CONFIG_FILE" | cut -d'=' -f2 2>/dev/null)
+
+    if [[ "$enable_stats" == "true" ]] && [[ -n "$port" ]]; then
+        local stats_url="http://localhost:$port/_api/stats"
+        if [[ -n "$api_key" ]]; then
+            stats_url="${stats_url}?key=$api_key"
+        fi
+
+        print_status "info" "从API获取统计数据..."
+        local api_response=$(curl -s --connect-timeout 5 --max-time 10 "$stats_url" 2>/dev/null)
+
+        if [[ $? -eq 0 ]] && [[ -n "$api_response" ]]; then
+            # 尝试解析JSON响应
+            if command -v jq &> /dev/null; then
+                echo "总请求数: $(echo "$api_response" | jq -r '.stats.totalRequests // "N/A"')"
+                echo "成功请求数: $(echo "$api_response" | jq -r '.stats.successfulRequests // "N/A"')"
+                echo "失败请求数: $(echo "$api_response" | jq -r '.stats.failedRequests // "N/A"')"
+                echo "平均响应时间: $(echo "$api_response" | jq -r '.stats.averageResponseTime // "N/A"')ms"
+                echo "活动IP数: $(echo "$api_response" | jq -r '.rateLimiter.totalIPs // "N/A"')"
+                echo "当前并发数: $(echo "$api_response" | jq -r '.concurrency.totalCount // "N/A"')"
+            elif command -v python3 &> /dev/null; then
+                echo "总请求数: $(echo "$api_response" | python3 -c "import sys,json; data=json.load(sys.stdin); print(data.get('stats',{}).get('totalRequests','N/A'))" 2>/dev/null || echo "N/A")"
+                echo "成功请求数: $(echo "$api_response" | python3 -c "import sys,json; data=json.load(sys.stdin); print(data.get('stats',{}).get('successfulRequests','N/A'))" 2>/dev/null || echo "N/A")"
+                echo "失败请求数: $(echo "$api_response" | python3 -c "import sys,json; data=json.load(sys.stdin); print(data.get('stats',{}).get('failedRequests','N/A'))" 2>/dev/null || echo "N/A")"
+                echo "平均响应时间: $(echo "$api_response" | python3 -c "import sys,json; data=json.load(sys.stdin); print(str(data.get('stats',{}).get('averageResponseTime','N/A'))+'ms')" 2>/dev/null || echo "N/A")"
+            else
+                # 简单的文本解析
+                echo "API响应: $api_response"
+            fi
+        else
+            print_status "warning" "无法从API获取统计数据，尝试从日志获取..."
+            # 从日志文件获取统计
+            if [[ -f "$LOG_FILE" ]]; then
+                echo "最近1小时请求数: $(grep "$(date -d '1 hour ago' '+%Y-%m-%d %H')" "$LOG_FILE" 2>/dev/null | wc -l)"
+                echo "最近24小时请求数: $(grep "$(date -d '1 day ago' '+%Y-%m-%d')" "$LOG_FILE" 2>/dev/null | wc -l)"
+            else
+                echo "无统计数据可用"
+            fi
+        fi
+    elif [[ "$enable_stats" != "true" ]]; then
+        print_status "warning" "统计功能未启用"
+        echo "要启用统计功能，请运行脚本选择 '修改配置' -> '统计功能'"
+        echo "或手动设置环境变量: ENABLE_STATS=true"
+    else
+        print_status "warning" "无法获取端口信息，从日志获取统计..."
+        if [[ -f "$LOG_FILE" ]]; then
+            echo "最近1小时请求数: $(grep "$(date -d '1 hour ago' '+%Y-%m-%d %H')" "$LOG_FILE" 2>/dev/null | wc -l)"
+            echo "最近24小时请求数: $(grep "$(date -d '1 day ago' '+%Y-%m-%d')" "$LOG_FILE" 2>/dev/null | wc -l)"
+        else
+            echo "无统计数据可用"
+        fi
     fi
     
     echo
     read -p "按回车键继续..."
+}
+
+# 测试统计功能
+test_stats_function() {
+    print_status "info" "测试统计功能..."
+
+    if [[ ! -f "$CONFIG_FILE" ]]; then
+        print_status "error" "配置文件不存在"
+        return $EXIT_CONFIG_ERROR
+    fi
+
+    local port=$(grep "^PORT=" "$CONFIG_FILE" | cut -d'=' -f2 2>/dev/null)
+    local api_key=$(grep "^API_KEY=" "$CONFIG_FILE" | cut -d'=' -f2 2>/dev/null)
+    local enable_stats=$(grep "^ENABLE_STATS=" "$CONFIG_FILE" | cut -d'=' -f2 2>/dev/null)
+
+    if [[ "$enable_stats" != "true" ]]; then
+        print_status "warning" "统计功能未启用"
+        read -p "是否启用统计功能? (Y/n): " enable_now
+        if [[ ! "$enable_now" =~ ^[Nn]$ ]]; then
+            sed -i "s/^ENABLE_STATS=.*/ENABLE_STATS=true/" "$CONFIG_FILE"
+            print_status "success" "统计功能已启用"
+            print_status "info" "重启服务以应用更改..."
+            restart_service
+            if [[ $? -ne 0 ]]; then
+                print_status "error" "服务重启失败"
+                return $EXIT_SERVICE_ERROR
+            fi
+        else
+            print_status "info" "测试取消"
+            return 0
+        fi
+    fi
+
+    # 检查服务是否运行
+    if ! systemctl is-active --quiet "$SERVICE_NAME"; then
+        print_status "error" "服务未运行，请先启动服务"
+        return $EXIT_SERVICE_ERROR
+    fi
+
+    print_status "info" "发送测试请求..."
+
+    # 发送几个测试请求
+    local test_urls=("httpbin.org/get" "httpbin.org/ip" "httpbin.org/user-agent")
+    local success_count=0
+
+    for url in "${test_urls[@]}"; do
+        print_status "info" "测试请求: $url"
+        local response=$(curl -s -w "%{http_code}" -o /dev/null --connect-timeout 10 "http://localhost:$port/$url" 2>/dev/null)
+
+        if [[ "$response" == "200" ]]; then
+            print_status "success" "请求成功 (HTTP: $response)"
+            success_count=$((success_count + 1))
+        else
+            print_status "warning" "请求失败 (HTTP: $response)"
+        fi
+        sleep 1
+    done
+
+    print_status "info" "等待统计数据更新..."
+    sleep 2
+
+    # 检查统计数据
+    print_status "info" "获取统计数据..."
+    local stats_url="http://localhost:$port/_api/stats"
+    if [[ -n "$api_key" ]]; then
+        stats_url="${stats_url}?key=$api_key"
+    fi
+
+    local stats_response=$(curl -s --connect-timeout 10 "$stats_url" 2>/dev/null)
+
+    if [[ $? -eq 0 ]] && [[ -n "$stats_response" ]]; then
+        echo
+        print_status "success" "统计数据获取成功！"
+        print_separator
+
+        if command -v jq &> /dev/null; then
+            echo "📊 统计摘要:"
+            echo "  总请求数: $(echo "$stats_response" | jq -r '.stats.totalRequests // "0"')"
+            echo "  成功请求数: $(echo "$stats_response" | jq -r '.stats.successfulRequests // "0"')"
+            echo "  失败请求数: $(echo "$stats_response" | jq -r '.stats.failedRequests // "0"')"
+            echo "  平均响应时间: $(echo "$stats_response" | jq -r '.stats.averageResponseTime // "0"')ms"
+            echo "  活动IP数: $(echo "$stats_response" | jq -r '.rateLimiter.totalIPs // "0"')"
+            echo "  当前并发数: $(echo "$stats_response" | jq -r '.concurrency.totalCount // "0"')"
+
+            echo
+            echo "🌐 热门域名:"
+            echo "$stats_response" | jq -r '.stats.topDomains | to_entries[] | "  \(.key): \(.value) 次"' 2>/dev/null || echo "  无数据"
+
+        elif command -v python3 &> /dev/null; then
+            echo "📊 统计摘要:"
+            echo "  总请求数: $(echo "$stats_response" | python3 -c "import sys,json; data=json.load(sys.stdin); print(data.get('stats',{}).get('totalRequests',0))" 2>/dev/null || echo "0")"
+            echo "  成功请求数: $(echo "$stats_response" | python3 -c "import sys,json; data=json.load(sys.stdin); print(data.get('stats',{}).get('successfulRequests',0))" 2>/dev/null || echo "0")"
+            echo "  失败请求数: $(echo "$stats_response" | python3 -c "import sys,json; data=json.load(sys.stdin); print(data.get('stats',{}).get('failedRequests',0))" 2>/dev/null || echo "0")"
+        else
+            echo "📊 原始统计数据:"
+            echo "$stats_response"
+        fi
+
+        print_separator
+        print_status "success" "统计功能测试完成！"
+
+        if [[ $success_count -gt 0 ]]; then
+            print_status "info" "✅ 统计功能正常工作"
+            print_status "info" "✅ 成功处理 $success_count 个测试请求"
+        else
+            print_status "warning" "⚠️ 所有测试请求都失败了，请检查网络连接"
+        fi
+
+    else
+        print_status "error" "无法获取统计数据"
+        print_status "info" "可能的原因:"
+        echo "  1. API密钥不正确"
+        echo "  2. 统计功能未正确启用"
+        echo "  3. 服务内部错误"
+        echo "  4. 网络连接问题"
+
+        # 提供调试信息
+        echo
+        print_status "info" "调试信息:"
+        echo "  统计API URL: $stats_url"
+        echo "  配置文件中的统计设置: $enable_stats"
+        echo "  API密钥设置: $([ -n "$api_key" ] && echo "已设置" || echo "未设置")"
+    fi
 }
 
 # 更新服务
@@ -2231,13 +2436,14 @@ show_main_menu() {
         echo "  9) 健康检查"
         echo " 10) 服务诊断"
         echo " 11) 性能监控"
-        echo " 12) 更新服务"
-        echo " 13) 系统优化"
+        echo " 12) 测试统计功能"
+        echo " 13) 更新服务"
+        echo " 14) 系统优化"
         echo
 
         print_status "cyan" "🗑️  其他操作"
-        echo " 14) 检查脚本更新"
-        echo " 15) 完全卸载"
+        echo " 15) 检查脚本更新"
+        echo " 16) 完全卸载"
         echo "  0) 退出脚本"
         
     else
@@ -2318,10 +2524,11 @@ handle_user_input() {
       9) health_check ;;
       10) service_diagnosis ;;
       11) performance_monitor ;;
-      12) update_service ;;
-      13) optimize_system ;;
-      14) check_script_update ;;
-      15) uninstall_service ;;
+      12) test_stats_function ;;
+      13) update_service ;;
+      14) optimize_system ;;
+      15) check_script_update ;;
+      16) uninstall_service ;;
       0)
           print_status "info" "再见! 👋"
           exit $EXIT_SUCCESS
@@ -2411,7 +2618,7 @@ main() {
 
         # 读取用户输入，增加超时
         local choice=""
-        read -t 300 -p "请选择操作 [0-15]: " choice 2>/dev/null || {
+        read -t 300 -p "请选择操作 [0-16]: " choice 2>/dev/null || {
             echo
             print_status "warning" "输入超时，退出脚本"
             break

@@ -49,7 +49,7 @@ function loadConfig(): Config {
     concurrentLimit: parseInt(Deno.env.get('CONCURRENT_LIMIT') || '10'),
     totalConcurrentLimit: parseInt(Deno.env.get('TOTAL_CONCURRENT_LIMIT') || '1000'),
     apiKey: Deno.env.get('API_KEY'),
-    enableStats: Deno.env.get('ENABLE_STATS') === 'true',
+    enableStats: Deno.env.get('ENABLE_STATS') !== 'false',
     enableLogging: Deno.env.get('ENABLE_LOGGING') !== 'false',
     logWebhook: Deno.env.get('LOG_WEBHOOK'),
     maxUrlLength: parseInt(Deno.env.get('MAX_URL_LENGTH') || '2048'),
