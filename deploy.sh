@@ -2,6 +2,9 @@
 
 # CIAO-CORS 一键部署和管理脚本
 # 支持安装、配置、监控、更新、卸载等完整功能
+# 版本: 1.1.0
+# 作者: bestZwei
+# 项目: https://github.com/bestZwei/ciao-cors
 
 # ==================== 全局变量 ====================
 SCRIPT_VERSION="1.1.0"
@@ -55,43 +58,56 @@ check_root() {
 
 # 检查系统要求
 check_requirements() {
-    print_status "info" "检查系统要求..."
-    
-    # 检查操作系统
-    if [[ ! -f /etc/os-release ]]; then
-        print_status "error" "不支持的操作系统"
-        exit 1
+  print_status "info" "检查系统要求..."
+  
+  # 检查Linux发行版
+  if [[ -f /etc/os-release ]]; then
+    source /etc/os-release
+    print_status "info" "检测到操作系统: $NAME $VERSION_ID"
+  else
+    print_status "warning" "未能识别操作系统类型，将尝试继续安装"
+  fi
+  
+  # 检查基本命令
+  local required_commands=("curl" "wget" "systemctl" "firewall-cmd")
+  for cmd in "${required_commands[@]}"; do
+      if ! command -v "$cmd" &> /dev/null; then
+          print_status "warning" "命令 $cmd 未找到，尝试安装..."
+          case $cmd in
+              "curl"|"wget")
+                  if command -v yum &> /dev/null; then
+                      yum install -y curl wget
+                  elif command -v apt &> /dev/null; then
+                      apt update && apt install -y curl wget
+                  fi
+                  ;;
+              "firewall-cmd")
+                  if command -v yum &> /dev/null; then
+                      yum install -y firewalld
+                      systemctl enable firewalld
+                      systemctl start firewalld
+                  elif command -v apt &> /dev/null; then
+                      apt install -y firewalld
+                      systemctl enable firewalld
+                      systemctl start firewalld
+                  fi
+                  ;;
+          esac
+      fi
+  done
+  
+  # 检查磁盘空间
+  local free_space=$(df -m / | awk 'NR==2 {print $4}')
+  if [[ $free_space -lt 100 ]]; then
+    print_status "warning" "可用磁盘空间不足 100MB，这可能导致安装问题"
+    read -p "是否继续? (y/N): " continue_install
+    if [[ ! "$continue_install" =~ ^[Yy]$ ]]; then
+      print_status "error" "安装取消"
+      exit 1
     fi
-    
-    # 检查基本命令
-    local required_commands=("curl" "wget" "systemctl" "firewall-cmd")
-    for cmd in "${required_commands[@]}"; do
-        if ! command -v "$cmd" &> /dev/null; then
-            print_status "warning" "命令 $cmd 未找到，尝试安装..."
-            case $cmd in
-                "curl"|"wget")
-                    if command -v yum &> /dev/null; then
-                        yum install -y curl wget
-                    elif command -v apt &> /dev/null; then
-                        apt update && apt install -y curl wget
-                    fi
-                    ;;
-                "firewall-cmd")
-                    if command -v yum &> /dev/null; then
-                        yum install -y firewalld
-                        systemctl enable firewalld
-                        systemctl start firewalld
-                    elif command -v apt &> /dev/null; then
-                        apt install -y firewalld
-                        systemctl enable firewalld
-                        systemctl start firewalld
-                    fi
-                    ;;
-            esac
-        fi
-    done
-    
-    print_status "success" "系统要求检查完成"
+  fi
+  
+  print_status "success" "系统要求检查完成"
 }
 
 # 检查Deno安装状态
@@ -110,26 +126,67 @@ check_deno_installation() {
 
 # 安装Deno
 install_deno() {
-    print_status "info" "开始安装Deno..."
-    
-    # 下载并安装Deno
-    curl -fsSL https://deno.land/x/install/install.sh | sh
-    
-    # 添加到PATH
-    export DENO_INSTALL="$HOME/.deno"
-    export PATH="$DENO_INSTALL/bin:$PATH"
-    
-    # 创建全局链接
-    ln -sf "$HOME/.deno/bin/deno" /usr/local/bin/deno
-    
-    if command -v deno &> /dev/null; then
-        local version=$(deno --version | head -n 1 | awk '{print $2}')
-        print_status "success" "Deno安装成功 (版本: $version)"
-        return 0
-    else
-        print_status "error" "Deno安装失败"
+  print_status "info" "开始安装Deno..."
+  
+  # 备份失败处理
+  local install_failed=0
+  
+  # 检查依赖
+  local deps=("curl" "unzip")
+  for dep in "${deps[@]}"; do
+    if ! command -v $dep &> /dev/null; then
+      print_status "info" "安装依赖: $dep"
+      if command -v apt &> /dev/null; then
+        apt update && apt install -y $dep || install_failed=1
+      elif command -v yum &> /dev/null; then
+        yum install -y $dep || install_failed=1
+      fi
+      
+      if [[ $install_failed -eq 1 ]]; then
+        print_status "error" "安装依赖 $dep 失败"
         return 1
+      fi
     fi
+  done
+  
+  # 下载并安装Deno
+  curl -fsSL https://deno.land/x/install/install.sh | sh
+  
+  # 添加到PATH
+  export DENO_INSTALL="$HOME/.deno"
+  export PATH="$DENO_INSTALL/bin:$PATH"
+  
+  # 创建全局链接
+  ln -sf "$HOME/.deno/bin/deno" /usr/local/bin/deno
+  
+  # 验证安装
+  if ! command -v deno &> /dev/null; then
+    print_status "error" "Deno安装失败"
+    
+    # 尝试手动安装
+    print_status "info" "尝试手动安装Deno..."
+    mkdir -p ~/.deno/bin
+    curl -fsSL https://github.com/denoland/deno/releases/latest/download/deno-x86_64-unknown-linux-gnu.zip -o /tmp/deno.zip
+    unzip -o /tmp/deno.zip -d ~/.deno/bin
+    chmod +x ~/.deno/bin/deno
+    ln -sf ~/.deno/bin/deno /usr/local/bin/deno
+    
+    if ! command -v deno &> /dev/null; then
+      print_status "error" "手动安装仍然失败，请参考 https://deno.land/#installation 手动安装"
+      return 1
+    else
+      print_status "success" "手动安装成功"
+    fi
+  fi
+  
+  if command -v deno &> /dev/null; then
+      local version=$(deno --version | head -n 1 | awk '{print $2}')
+      print_status "success" "Deno安装成功 (版本: $version)"
+      return 0
+  else
+      print_status "error" "Deno安装失败"
+      return 1
+  fi
 }
 
 # 下载或更新项目文件
@@ -435,18 +492,56 @@ show_service_info() {
 
 # 查看服务日志
 view_logs() {
-    echo
-    print_status "info" "最近的日志信息:"
-    echo
-    
-    if [[ -f "$LOG_FILE" ]]; then
-        tail -n 50 "$LOG_FILE"
-    else
-        journalctl -u "$SERVICE_NAME" -n 50 --no-pager
-    fi
-    
-    echo
-    read -p "按回车键继续..."
+  echo
+  print_status "info" "最近的日志信息:"
+  echo
+  
+  # 添加日志过滤选项
+  echo "1) 全部日志"
+  echo "2) 只显示错误日志"
+  echo "3) 按状态码过滤 (例如 404, 500)"
+  echo "4) 按IP地址过滤"
+  echo "5) 返回"
+  
+  read -p "请选择 [1-5]: " log_filter
+  
+  case $log_filter in
+    1)
+      if [[ -f "$LOG_FILE" ]]; then
+        tail -n 100 "$LOG_FILE"
+      else
+        journalctl -u "$SERVICE_NAME" -n 100 --no-pager
+      fi
+      ;;
+    2)
+      if [[ -f "$LOG_FILE" ]]; then
+        grep -i "error\|exception\|failed" "$LOG_FILE" | tail -n 50
+      else
+        journalctl -u "$SERVICE_NAME" --no-pager | grep -i "error\|exception\|failed" | tail -n 50
+      fi
+      ;;
+    3)
+      read -p "输入状态码: " status_code
+      if [[ -f "$LOG_FILE" ]]; then
+        grep -i "($status_code)" "$LOG_FILE" | tail -n 50
+      else
+        journalctl -u "$SERVICE_NAME" --no-pager | grep -i "($status_code)" | tail -n 50
+      fi
+      ;;
+    4)
+      read -p "输入IP地址: " ip_addr
+      if [[ -f "$LOG_FILE" ]]; then
+        grep -i "$ip_addr" "$LOG_FILE" | tail -n 50
+      else
+        journalctl -u "$SERVICE_NAME" --no-pager | grep -i "$ip_addr" | tail -n 50
+      fi
+      ;;
+    5) return 0 ;;
+    *) print_status "error" "无效选择" ;;
+  esac
+  
+  echo
+  read -p "按回车键继续..."
 }
 
 # ==================== 配置管理函数 ====================
@@ -739,43 +834,162 @@ performance_monitor() {
 
 # 更新服务
 update_service() {
-    print_status "info" "开始更新服务..."
-    
-    # 备份当前版本
-    if [[ -f "$INSTALL_DIR/server.ts" ]]; then
-        cp "$INSTALL_DIR/server.ts" "$INSTALL_DIR/server.ts.backup.$(date +%Y%m%d_%H%M%S)"
-        print_status "info" "当前版本已备份"
-    fi
-    
-    # 停止服务
-    if systemctl is-active --quiet "$SERVICE_NAME"; then
-        print_status "info" "停止服务..."
-        systemctl stop "$SERVICE_NAME"
-    fi
-    
-    # 下载新版本
-    if download_project; then
-        print_status "success" "新版本下载成功"
-        
-        # 重启服务
-        if start_service; then
-            print_status "success" "服务更新完成"
-        else
-            print_status "error" "服务启动失败，尝试恢复备份..."
-            
-            # 恢复备份
-            local backup_file=$(ls -t "$INSTALL_DIR"/server.ts.backup.* 2>/dev/null | head -1)
-            if [[ -n "$backup_file" ]]; then
-                cp "$backup_file" "$INSTALL_DIR/server.ts"
-                start_service
-                print_status "warning" "已恢复到之前版本"
-            fi
-        fi
-    else
-        print_status "error" "更新失败"
-        # 尝试启动原服务
-        start_service
-    fi
+  print_status "info" "开始更新服务..."
+  
+  # 备份当前版本
+  if [[ -f "$INSTALL_DIR/server.ts" ]]; then
+      cp "$INSTALL_DIR/server.ts" "$INSTALL_DIR/server.ts.backup.$(date +%Y%m%d_%H%M%S)"
+      print_status "info" "当前版本已备份"
+  fi
+  
+  # 停止服务
+  if systemctl is-active --quiet "$SERVICE_NAME"; then
+      print_status "info" "停止服务..."
+      systemctl stop "$SERVICE_NAME"
+  fi
+  
+  # 下载新版本
+  if download_project; then
+      print_status "success" "新版本下载成功"
+      
+      # 重启服务
+      if start_service; then
+          print_status "success" "服务更新完成"
+      else
+          print_status "error" "服务启动失败，尝试恢复备份..."
+          
+          # 恢复备份
+          local backup_file=$(ls -t "$INSTALL_DIR"/server.ts.backup.* 2>/dev/null | head -1)
+          if [[ -n "$backup_file" ]]; then
+              cp "$backup_file" "$INSTALL_DIR/server.ts"
+              start_service
+              print_status "warning" "已恢复到之前版本"
+          fi
+      fi
+  else
+      print_status "error" "更新失败"
+      # 尝试启动原服务
+      start_service
+  fi
+}
+
+# 添加系统优化功能
+optimize_system() {
+  print_status "info" "系统优化..."
+  
+  echo
+  print_status "warning" "请选择要优化的项目:"
+  echo "1) 优化系统限制 (文件描述符、最大连接数)"
+  echo "2) 优化内核网络参数"
+  echo "3) 创建SWAP空间 (如果内存小于2GB)"
+  echo "4) 全部优化"
+  echo "0) 返回主菜单"
+  echo
+  
+  read -p "请选择 [0-4]: " choice
+  
+  case $choice in
+    1) optimize_system_limits ;;
+    2) optimize_network_params ;;
+    3) create_swap ;;
+    4)
+      optimize_system_limits
+      optimize_network_params
+      create_swap
+      ;;
+    0) return 0 ;;
+    *) print_status "error" "无效选择" ;;
+  esac
+}
+
+# 优化系统限制
+optimize_system_limits() {
+  print_status "info" "优化系统限制..."
+  
+  # 设置文件描述符限制
+  if ! grep -q "* soft nofile 65535" /etc/security/limits.conf; then
+    echo "* soft nofile 65535" >> /etc/security/limits.conf
+    echo "* hard nofile 65535" >> /etc/security/limits.conf
+    print_status "success" "文件描述符限制已优化"
+  else
+    print_status "info" "文件描述符限制已设置"
+  fi
+  
+  # 设置最大进程数
+  if ! grep -q "* soft nproc 65535" /etc/security/limits.conf; then
+    echo "* soft nproc 65535" >> /etc/security/limits.conf
+    echo "* hard nproc 65535" >> /etc/security/limits.conf
+    print_status "success" "最大进程数限制已优化"
+  else
+    print_status "info" "最大进程数限制已设置"
+  fi
+  
+  print_status "info" "系统限制优化完成，重启后生效"
+}
+
+# 优化网络参数
+optimize_network_params() {
+  print_status "info" "优化网络参数..."
+  
+  local sysctl_file="/etc/sysctl.d/99-ciao-cors.conf"
+  
+  cat > "$sysctl_file" << EOF
+# CIAO-CORS 网络优化参数
+# 增加连接队列
+net.core.somaxconn = 32768
+net.core.netdev_max_backlog = 32768
+
+# 优化TCP参数
+net.ipv4.tcp_max_syn_backlog = 8192
+net.ipv4.tcp_max_tw_buckets = 5000
+net.ipv4.tcp_fastopen = 3
+net.ipv4.tcp_fin_timeout = 30
+net.ipv4.tcp_keepalive_time = 1200
+
+# 增加端口范围
+net.ipv4.ip_local_port_range = 1024 65535
+EOF
+
+  sysctl -p "$sysctl_file"
+  print_status "success" "网络参数优化完成"
+}
+
+# 创建SWAP空间
+create_swap() {
+  # 检查内存大小和已有SWAP
+  local mem_total=$(free -m | awk '/^Mem:/{print $2}')
+  local swap_total=$(free -m | awk '/^Swap:/{print $2}')
+  
+  if [[ $mem_total -ge 2048 ]]; then
+    print_status "info" "内存大于2GB (${mem_total}MB)，无需创建SWAP"
+    return 0
+  fi
+  
+  if [[ $swap_total -gt 0 ]]; then
+    print_status "info" "已存在${swap_total}MB SWAP空间，无需创建"
+    return 0
+  fi
+  
+  print_status "info" "创建SWAP空间..."
+  
+  # 计算SWAP大小 (内存的2倍，最大4GB)
+  local swap_size=$((mem_total * 2))
+  if [[ $swap_size -gt 4096 ]]; then
+    swap_size=4096
+  fi
+  
+  # 创建SWAP文件
+  dd if=/dev/zero of=/swapfile bs=1M count=$swap_size
+  chmod 600 /swapfile
+  mkswap /swapfile
+  swapon /swapfile
+  
+  # 添加到fstab
+  if ! grep -q "/swapfile" /etc/fstab; then
+    echo "/swapfile swap swap defaults 0 0" >> /etc/fstab
+  fi
+  
+  print_status "success" "创建了${swap_size}MB SWAP空间"
 }
 
 # ==================== 卸载函数 ====================
@@ -904,10 +1118,11 @@ show_main_menu() {
         echo "  9) 健康检查"
         echo " 10) 性能监控"
         echo " 11) 更新服务"
+        echo " 12) 系统优化"
         echo
         
         print_status "cyan" "🗑️  其他操作"
-        echo " 12) 完全卸载"
+        echo " 13) 完全卸载"
         echo "  0) 退出脚本"
         
     else
@@ -972,54 +1187,55 @@ show_install_menu() {
 
 # 处理用户输入
 handle_user_input() {
-    local choice=$1
-    
-    if [[ -f "$SYSTEMD_SERVICE_FILE" ]]; then
-        # 已安装状态的菜单处理
-        case $choice in
-            1) start_service ;;
-            2) stop_service ;;
-            3) restart_service ;;
-            4) service_status ;;
-            5) view_logs ;;
-            6) modify_config ;;
-            7) show_config ;;
-            8) backup_config ;;
-            9) health_check ;;
-            10) performance_monitor ;;
-            11) update_service ;;
-            12) uninstall_service ;;
-            0) 
-                print_status "info" "再见! 👋"
-                exit 0 
-                ;;
-            *)
-                print_status "error" "无效选择，请重试"
-                sleep 2
-                ;;
-        esac
-    else
-        # 未安装状态的菜单处理
-        case $choice in
-            1) show_install_menu ;;
-            2) check_requirements ;;
-            3) 
-                if ! check_deno_installation; then
-                    install_deno
-                else
-                    print_status "info" "Deno已安装"
-                fi
-                ;;
-            0)
-                print_status "info" "再见! 👋"
-                exit 0
-                ;;
-            *)
-                print_status "error" "无效选择，请重试"
-                sleep 2
-                ;;
-        esac
-    fi
+  local choice=$1
+  
+  if [[ -f "$SYSTEMD_SERVICE_FILE" ]]; then
+    # 已安装状态的菜单处理
+    case $choice in
+      1) start_service ;;
+      2) stop_service ;;
+      3) restart_service ;;
+      4) service_status ;;
+      5) view_logs ;;
+      6) modify_config ;;
+      7) show_config ;;
+      8) backup_config ;;
+      9) health_check ;;
+      10) performance_monitor ;;
+      11) update_service ;;
+      12) optimize_system ;;
+      13) uninstall_service ;;
+      0) 
+          print_status "info" "再见! 👋"
+          exit 0 
+          ;;
+      *)
+          print_status "error" "无效选择，请重试"
+          sleep 2
+          ;;
+    esac
+  else
+    # 未安装状态的菜单处理
+    case $choice in
+      1) show_install_menu ;;
+      2) check_requirements ;;
+      3) 
+          if ! check_deno_installation; then
+              install_deno
+          else
+              print_status "info" "Deno已安装"
+          fi
+          ;;
+      0)
+          print_status "info" "再见! 👋"
+          exit 0
+          ;;
+      *)
+          print_status "error" "无效选择，请重试"
+          sleep 2
+          ;;
+    esac
+  fi
 }
 
 # ==================== 主函数 ====================

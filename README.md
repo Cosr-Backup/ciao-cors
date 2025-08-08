@@ -1,28 +1,28 @@
 # CIAO-CORS
 
-高性能、功能完整的CORS代理服务，支持多种部署方式和丰富的配置选项。
+高性能、功能完整的CORS代理服务，支持多种部署方式和丰富的配置选项。专为需要跨域资源访问的Web应用设计，提供了安全、可靠的代理解决方案。
 
 ## 功能特性
 
 ### 核心功能
-- 🚀 **高性能CORS代理**：支持所有HTTP方法和内容类型
-- 🔒 **安全防护**：IP/域名黑白名单、恶意URL检测
-- ⚡ **智能限流**：请求频率限制和并发控制
-- 📊 **实时监控**：请求统计、性能分析、状态监控
-- 🎯 **智能缓存**：GET请求响应缓存，提升性能
-- 📝 **完整日志**：控制台和Webhook日志支持
+- 🚀 **高性能CORS代理**：支持所有HTTP方法和内容类型，轻松解决跨域问题
+- 🔒 **安全防护**：IP/域名黑白名单、恶意URL检测、请求验证
+- ⚡ **智能限流**：动态请求频率限制和并发控制，防止资源滥用
+- 📊 **实时监控**：详细的请求统计、性能分析和状态监控
+- 🎯 **智能缓存**：GET请求响应缓存，大幅提升性能和减少外部请求
+- 📝 **完整日志**：支持控制台和Webhook日志，便于追踪和分析
 
 ### 配置选项
-- **黑白名单**：支持IP和域名级别的访问控制
-- **频率限制**：可配置的滑动窗口请求限制
-- **并发控制**：单IP和全局并发数限制
-- **统计监控**：可选的请求统计和性能监控
-- **API管理**：内置管理API，支持API密钥保护
+- **黑白名单**：支持IP和域名级别的访问控制，精确管理代理权限
+- **频率限制**：可配置的滑动窗口请求限制，自动防御恶意流量
+- **并发控制**：单IP和全局并发数限制，确保系统稳定
+- **统计监控**：可选的请求统计和性能监控，实时了解系统状态
+- **API管理**：内置管理API，支持API密钥保护，安全管理系统
 
 ### 部署方式
-- **Deno Deploy**：一键部署到全球CDN网络
-- **VPS部署**：完整的一键安装和管理脚本
-- **Docker容器**：支持容器化部署
+- **Deno Deploy**：一键部署到全球CDN网络，极速响应全球请求
+- **VPS部署**：完整的一键安装和管理脚本，轻松管理自己的实例
+- **Docker容器**：支持容器化部署，快速集成到现有基础设施
 
 ## 快速开始
 
@@ -34,13 +34,18 @@
    cd ciao-cors
    ```
 
-2. **登录Deno Deploy**
-   ```bash
-   deno task deploy
-   ```
+2. **创建Deno Deploy项目**
+   - 访问 [Deno Deploy](https://dash.deno.com)
+   - 创建新项目
+   - 选择"从GitHub部署"，选择您的仓库和server.ts文件
 
 3. **配置环境变量**
-   在Deno Deploy控制台中设置环境变量（可选）
+   - 在Deno Deploy控制台中设置环境变量（可选）
+   - 可以配置API_KEY、限流参数、域名黑白名单等
+
+4. **开始使用**
+   - 通过 `https://your-project.deno.dev/example.com/api/endpoint` 格式访问
+   - 第一个路径段是您要请求的目标域名和路径
 
 ### VPS部署
 
@@ -57,11 +62,11 @@
 
 3. **按照菜单提示操作**
    - 自动检测和安装Deno
-   - 配置服务参数
+   - 配置服务参数（端口、API密钥等）
    - 设置防火墙规则
    - 创建系统服务
 
-## 配置说明
+## 高级配置
 
 ### 环境变量
 
@@ -108,7 +113,7 @@ export TIMEOUT=60000
 export RATE_LIMIT_WINDOW=30000
 ```
 
-## API说明
+## API参考
 
 ### 代理使用
 
@@ -145,9 +150,19 @@ GET /_api/health?key=your-api-key
 GET /_api/stats?key=your-api-key
 ```
 
+**查看性能数据**
+```bash
+GET /_api/performance?key=your-api-key
+```
+
 **查看配置信息**
 ```bash
 GET /_api/config?key=your-api-key
+```
+
+**查看版本信息**
+```bash
+GET /_api/version?key=your-api-key
 ```
 
 **重置统计数据**
@@ -166,27 +181,54 @@ curl -H "Authorization: Bearer your-api-key" \
   https://your-domain.com/_api/stats
 ```
 
-## 本地开发
+## 安全最佳实践
 
-### 运行开发服务器
-```bash
-deno run --allow-net --allow-env server.ts
-```
+1. **始终设置API密钥**
+   - 保护管理API不被未授权访问
+   - 使用复杂的随机密钥
 
-### 类型检查
-```bash
-deno check server.ts
-```
+2. **配置适当的限流**
+   - 根据应用需求和服务器资源调整限流参数
+   - 防止单个客户端消耗过多资源
 
-### 格式化代码
-```bash
-deno fmt server.ts
-```
+3. **使用域名白名单**
+   - 限制只能代理受信任的域名
+   - 防止服务被滥用于访问恶意网站
 
-### Lint检查
-```bash
-deno lint server.ts
-```
+4. **启用统计和日志**
+   - 监控异常流量模式
+   - 设置日志Webhook收集到集中式日志系统
+
+5. **定期更新**
+   - 使用管理脚本定期更新到最新版本
+   - 关注安全公告和补丁
+
+## 性能优化
+
+### 推荐配置
+- **小型站点**：并发限制10，频率限制60/分钟
+- **中型站点**：并发限制50，频率限制300/分钟
+- **大型站点**：并发限制100，频率限制1000/分钟
+
+### 优化技巧
+1. **增加缓存时间**
+   - 对于不经常变化的内容，可以延长缓存TTL
+   - 添加自定义缓存控制头
+
+2. **调整并发限制**
+   - 对于强CPU服务器，可以增加并发限制
+   - 监控系统负载，避免过载
+
+3. **使用VPS部署脚本的系统优化功能**
+   - 优化系统限制（文件描述符、连接数）
+   - 调整网络参数提高吞吐量
+   - 添加SWAP空间（低内存服务器）
+
+### 监控指标
+- 平均响应时间（目标：<500ms）
+- 错误率（目标：<1%）
+- 并发连接数
+- 缓存命中率（目标：>70%）
 
 ## 故障排除
 
@@ -219,6 +261,14 @@ export TIMEOUT=60000
 export ENABLE_STATS=true
 ```
 
+**Q: 客户端收到CORS错误**
+```bash
+# 检查允许的来源设置
+export ALLOWED_ORIGINS='["*"]'
+# 或者指定特定域名
+export ALLOWED_ORIGINS='["https://your-app.com"]'
+```
+
 ### 调试技巧
 
 **查看实时日志**
@@ -230,27 +280,18 @@ sudo journalctl -f -u ciao-cors
 deno run --allow-net --allow-env server.ts
 ```
 
-**测试配置**
+**API调试**
 ```bash
 # 健康检查
 curl http://localhost:3000/_api/health
 
 # 测试代理
 curl http://localhost:3000/httpbin.org/ip
+
+# 性能数据
+curl -H "Authorization: Bearer your-api-key" \
+  http://localhost:3000/_api/performance
 ```
-
-## 性能优化
-
-### 推荐配置
-- **小型站点**：并发限制10，频率限制60/分钟
-- **中型站点**：并发限制50，频率限制300/分钟
-- **大型站点**：并发限制100，频率限制1000/分钟
-
-### 监控指标
-- 平均响应时间
-- 错误率
-- 并发连接数
-- 缓存命中率
 
 ## 更新日志
 
@@ -260,6 +301,7 @@ curl http://localhost:3000/httpbin.org/ip
 - ✨ 新增批量日志发送
 - 🐛 修复TypeScript类型错误
 - ⚡ 优化内存使用和性能
+- 🔧 增加系统优化功能
 
 ### v1.0.0 (2024-01-XX)
 - 🎉 首次发布
@@ -268,11 +310,21 @@ curl http://localhost:3000/httpbin.org/ip
 - ✨ 统计和监控功能
 - ✨ 管理API接口
 
+## 技术架构
+
+CIAO-CORS 采用现代化的架构设计，确保高性能和可靠性：
+
+- **运行时环境**：使用Deno运行时，获得原生TypeScript支持和安全沙箱
+- **无依赖设计**：不依赖外部npm包，减少安全风险和部署复杂性
+- **内存优化**：智能缓存管理和资源清理，避免内存泄漏
+- **并发控制**：多级限流策略，确保系统稳定性
+- **安全增强**：全面的请求验证和过滤，防止恶意请求
+
 ## 许可证
 
 MIT License - 详见 [LICENSE](LICENSE) 文件
 
-## 贡献
+## 贡献指南
 
 欢迎提交Issue和Pull Request！
 
@@ -282,9 +334,33 @@ MIT License - 详见 [LICENSE](LICENSE) 文件
 4. 推送到分支 (`git push origin feature/AmazingFeature`)
 5. 开启Pull Request
 
+### 开发环境设置
+
+```bash
+# 安装Deno
+curl -fsSL https://deno.land/x/install/install.sh | sh
+
+# 本地运行
+deno run --allow-net --allow-env server.ts
+
+# 类型检查
+deno check server.ts
+
+# 代码格式化
+deno fmt server.ts
+
+# 代码lint
+deno lint server.ts
+```
+
 ## 支持
 
 如果这个项目对你有帮助，请给个⭐️！
+
+### 联系方式
+
+- GitHub Issues: [https://github.com/bestZwei/ciao-cors/issues](https://github.com/bestZwei/ciao-cors/issues)
+- Email: [your-email@example.com](mailto:your-email@example.com)
 
 ---
 

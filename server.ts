@@ -1,6 +1,8 @@
 /**
  * CIAO-CORS - 高性能CORS代理服务
  * 支持环境变量配置、请求限制、黑白名单、统计等功能
+ * 作者: bestZwei
+ * 项目: https://github.com/bestZwei/ciao-cors
  */
 
 // ==================== 配置管理模块 ====================
@@ -211,6 +213,11 @@ function validateRequest(url: string, ip: string, config: Config, origin?: strin
     return { valid: false, reason: 'Malicious URL pattern' };
   }
 
+  // 增强URL安全验证 - 检查是否包含控制字符
+  if (/[\u0000-\u001F\u007F-\u009F]/.test(url)) {
+    return { valid: false, reason: 'URL contains control characters' };
+  }
+
   return { valid: true };
 }
 
@@ -266,7 +273,14 @@ async function processRequestBody(request: Request): Promise<any> {
 
   try {
     if (contentType.includes('application/json')) {
-      return JSON.stringify(await request.json());
+      // 使用克隆请求防止body被消费后无法再次读取
+      const clonedRequest = request.clone();
+      try {
+        return JSON.stringify(await clonedRequest.json());
+      } catch (e) {
+        // JSON解析失败时返回原始文本
+        return await request.text();
+      }
     } else if (contentType.includes('application/x-www-form-urlencoded') || 
                contentType.includes('multipart/form-data')) {
       return await request.formData();
@@ -275,7 +289,9 @@ async function processRequestBody(request: Request): Promise<any> {
     } else {
       return await request.arrayBuffer();
     }
-  } catch {
+  } catch (e) {
+    // 增加错误日志
+    console.error("Error processing request body:", e);
     return await request.arrayBuffer();
   }
 }
@@ -399,6 +415,40 @@ class StatsCollector {
       hourlyStats: this.hourlyStats
     };
     return result;
+  }
+
+  // 添加性能分析数据
+  getPerformanceData(): {
+    requestsPerMinute: number;
+    averageResponseTime: number;
+    errorRate: number;
+    topEndpoints: [string, number][];
+  } {
+    const now = Date.now();
+    const oneMinuteAgo = now - 60000;
+    
+    // 计算最近一分钟的请求数
+    const recentHourlyStats = this.hourlyStats.filter(stat => stat.timestamp > oneMinuteAgo);
+    const requestsLastMinute = recentHourlyStats.length > 0 
+      ? this.stats.totalRequests - recentHourlyStats[0].requests 
+      : 0;
+    
+    // 计算错误率
+    const errorRate = this.stats.totalRequests > 0 
+      ? this.stats.failedRequests / this.stats.totalRequests 
+      : 0;
+    
+    // 获取最常访问的目标域名
+    const topEndpoints = Array.from(this.stats.topDomains.entries())
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 5);
+    
+    return {
+      requestsPerMinute: requestsLastMinute,
+      averageResponseTime: this.stats.averageResponseTime,
+      errorRate: errorRate,
+      topEndpoints: topEndpoints
+    };
   }
 
   reset(): void {
@@ -544,6 +594,8 @@ class CiaoCorsServer {
   }
 
   async handleRequest(request: Request): Promise<Response> {
+    // 增加请求ID用于日志追踪
+    const requestId = crypto.randomUUID ? crypto.randomUUID() : `req-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
     const startTime = Date.now();
     const clientIP = this.getClientIP(request);
     const origin = request.headers.get('origin');
@@ -561,6 +613,17 @@ class CiaoCorsServer {
       // 处理管理API
       if (targetPath.startsWith('_api/')) {
         return this.handleManagementApi(request, targetPath);
+      }
+
+      // 添加健康检查路径
+      if (targetPath === 'health' || targetPath === '_health') {
+        return new Response(JSON.stringify({
+          status: 'ok',
+          timestamp: new Date().toISOString(),
+          version: '1.1.0'
+        }), {
+          headers: { 'Content-Type': 'application/json' }
+        });
       }
 
       // 验证基本URL格式
@@ -654,7 +717,13 @@ class CiaoCorsServer {
       }
 
     } catch (error) {
-      this.logger.logError(error as Error, { url: request.url, ip: clientIP });
+      // 改进错误处理和日志
+      this.logger.logError(error as Error, { 
+        url: request.url, 
+        ip: clientIP, 
+        requestId: requestId,
+        timestamp: new Date().toISOString() 
+      });
       
       if (this.config.enableStats) {
         this.statsCollector.recordRequest(clientIP, 'error', 500, Date.now() - startTime, false);
@@ -780,6 +849,25 @@ class CiaoCorsServer {
         return new Response(JSON.stringify({
           success: true,
           message: `Cache cleared successfully (${cacheSize} entries)`
+        }), {
+          headers: { 'Content-Type': 'application/json' }
+        });
+
+      case 'performance':
+        if (!this.config.enableStats) {
+          return this.createErrorResponse(404, 'Stats disabled');
+        }
+        const performanceData = this.statsCollector.getPerformanceData();
+        return new Response(JSON.stringify(performanceData, null, 2), {
+          headers: { 'Content-Type': 'application/json' }
+        });
+
+      case 'version':
+        return new Response(JSON.stringify({
+          version: '1.1.0',
+          runtime: `Deno ${Deno.version.deno}`,
+          typescript: Deno.version.typescript,
+          v8: Deno.version.v8
         }), {
           headers: { 'Content-Type': 'application/json' }
         });
@@ -918,6 +1006,21 @@ async function main() {
  */
 export default {
   async fetch(request: Request, env: any, ctx: any): Promise<Response> {
+    // 处理预飞请求特殊情况
+    if (request.method === 'OPTIONS') {
+      const headers = new Headers({
+        "Access-Control-Allow-Origin": "*",
+        "Access-Control-Allow-Methods": "GET, POST, PUT, PATCH, DELETE, OPTIONS",
+        "Access-Control-Allow-Headers": request.headers.get('Access-Control-Request-Headers') || 
+          "Accept, Authorization, Cache-Control, Content-Type, DNT, If-Modified-Since, Keep-Alive, Origin, User-Agent, X-Requested-With, Token, x-access-token",
+        "Access-Control-Max-Age": "86400"
+      });
+      return new Response(null, {
+        status: 204,
+        headers
+      });
+    }
+
     // 为Deno Deploy环境设置环境变量
     if (env) {
       for (const [key, value] of Object.entries(env)) {
