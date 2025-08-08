@@ -23,6 +23,7 @@ interface Config {
   logWebhook?: string;
   maxUrlLength: number;
   timeout: number;
+  requireHeaders: boolean;
 }
 
 /**
@@ -78,7 +79,8 @@ function loadConfig(): Config {
     enableLogging: Deno.env.get('ENABLE_LOGGING') !== 'false',
     logWebhook: Deno.env.get('LOG_WEBHOOK')?.trim() || undefined,
     maxUrlLength: validatePositiveInt(parseInt(Deno.env.get('MAX_URL_LENGTH') || '2048'), 2048, 'MAX_URL_LENGTH'),
-    timeout: validatePositiveInt(parseInt(Deno.env.get('TIMEOUT') || '30000'), 30000, 'TIMEOUT')
+    timeout: validatePositiveInt(parseInt(Deno.env.get('TIMEOUT') || '30000'), 30000, 'TIMEOUT'),
+    requireHeaders: Deno.env.get('REQUIRE_HEADERS') !== 'false'
   };
 
   // 验证数组配置的有效性
@@ -833,7 +835,7 @@ class CiaoCorsServer {
     const startTime = Date.now();
     const clientIP = this.getClientIP(request);
     const origin = request.headers.get('origin');
-    
+
     try {
       // 处理OPTIONS预检请求
       if (request.method === 'OPTIONS') {
@@ -843,7 +845,7 @@ class CiaoCorsServer {
       // 解析目标URL
       const url = new URL(request.url);
       let targetPath = decodeURIComponent(url.pathname.substring(1));
-      
+
       // 处理管理API
       if (targetPath.startsWith('_api/')) {
         return this.handleManagementApi(request, targetPath);
@@ -861,12 +863,25 @@ class CiaoCorsServer {
       }
 
       // 验证基本URL格式
-      if (targetPath.length < 3 || !targetPath.includes('.') || 
+      if (targetPath.length < 3 || !targetPath.includes('.') ||
           targetPath === 'favicon.ico' || targetPath === 'robots.txt') {
         return this.createErrorResponse(400, 'Invalid URL format', {
           usage: 'https://your-domain.com/{target-url}',
           example: 'https://your-domain.com/httpbin.org/get'
         });
+      }
+
+      // 添加必需头部验证（类似 cors-anywhere.com）
+      if (this.config.requireHeaders) {
+        const hasOrigin = request.headers.has('origin');
+        const hasXRequestedWith = request.headers.has('x-requested-with');
+
+        if (!hasOrigin && !hasXRequestedWith) {
+          return this.createErrorResponse(403, 'Missing required request header. Must specify one of: origin,x-requested-with', {
+            usage: 'Add "Origin" or "X-Requested-With" header to your request',
+            example: 'fetch(url, { headers: { "X-Requested-With": "XMLHttpRequest" } })'
+          });
+        }
       }
 
       // 检查请求频率限制
@@ -1356,6 +1371,7 @@ async function main() {
   ⏱️ Rate limit: ${config.rateLimit} requests per ${config.rateLimitWindow / 1000}s
   🔄 Concurrent limit: ${config.concurrentLimit} per IP, ${config.totalConcurrentLimit} total
   🔒 API key: ${config.apiKey ? 'configured' : 'not set'}
+  🛡️ Header validation: ${config.requireHeaders ? 'enabled' : 'disabled'}
 ====================================================
   `);
   

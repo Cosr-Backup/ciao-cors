@@ -104,6 +104,7 @@
 | `BLOCKED_IPS` | - | 禁止的IP地址列表（JSON或逗号分隔） |
 | `BLOCKED_DOMAINS` | - | 禁止的域名列表（JSON或逗号分隔） |
 | `ALLOWED_DOMAINS` | - | 允许的域名列表（JSON或逗号分隔） |
+| `REQUIRE_HEADERS` | `true` | 是否强制要求Origin或X-Requested-With头部 |
 
 ### 配置示例
 
@@ -120,6 +121,7 @@ export API_KEY=your-secret-key
 export BLOCKED_IPS='["192.168.1.100", "10.0.0.5"]'
 export ALLOWED_DOMAINS='["api.example.com", "data.example.org"]'
 export BLOCKED_DOMAINS='["malicious.com", "spam.net"]'
+export REQUIRE_HEADERS=true  # 强制要求Origin或X-Requested-With头部
 ```
 
 **性能配置**
@@ -141,16 +143,36 @@ https://your-domain.com/{target-url}
 
 **使用示例**
 ```bash
-# 代理GET请求
-curl https://your-domain.com/httpbin.org/get
+# 代理GET请求（需要添加必需的头部）
+curl -H "X-Requested-With: XMLHttpRequest" \
+  https://your-domain.com/httpbin.org/get
 
 # 代理POST请求
 curl -X POST https://your-domain.com/jsonplaceholder.typicode.com/posts \
   -H "Content-Type: application/json" \
+  -H "X-Requested-With: XMLHttpRequest" \
   -d '{"title": "test", "body": "content"}'
 
-# 代理带参数的请求
-curl "https://your-domain.com/api.github.com/users/octocat"
+# 使用Origin头部（浏览器fetch会自动添加）
+curl -H "Origin: https://your-app.com" \
+  "https://your-domain.com/api.github.com/users/octocat"
+```
+
+**JavaScript fetch示例**
+```javascript
+// fetch会自动添加Origin头部，无需手动设置
+fetch('https://your-domain.com/httpbin.org/get')
+  .then(response => response.json())
+  .then(data => console.log(data));
+
+// 或者手动添加X-Requested-With头部
+fetch('https://your-domain.com/httpbin.org/get', {
+  headers: {
+    'X-Requested-With': 'XMLHttpRequest'
+  }
+})
+  .then(response => response.json())
+  .then(data => console.log(data));
 ```
 
 ### 管理API
@@ -426,6 +448,20 @@ curl https://raw.githubusercontent.com/bestZwei/ciao-cors/main/test-stats.sh | b
 export ALLOWED_ORIGINS='["*"]'
 # 或者指定特定域名
 export ALLOWED_ORIGINS='["https://your-app.com"]'
+```
+
+**Q: 收到"Missing required request header"错误**
+```bash
+# 这是新的安全功能，需要添加必需的头部
+# 方法1：在请求中添加X-Requested-With头部
+curl -H "X-Requested-With: XMLHttpRequest" https://your-domain.com/target-url
+
+# 方法2：在请求中添加Origin头部
+curl -H "Origin: https://your-app.com" https://your-domain.com/target-url
+
+# 方法3：如果需要禁用此功能（不推荐）
+export REQUIRE_HEADERS=false
+sudo systemctl restart ciao-cors
 ```
 
 ### 快速诊断
