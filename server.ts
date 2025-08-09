@@ -1,7 +1,7 @@
 /**
  * CIAO-CORS - 高性能CORS代理服务
  * 支持环境变量配置、请求限制、黑白名单、统计等功能
- * 版本: v1.2.5
+ * 版本: v1.3.0
  * 作者: bestZwei
  * 项目: https://github.com/bestZwei/ciao-cors
  */
@@ -400,9 +400,55 @@ function buildProxyHeaders(originalHeaders: Headers): Record<string, string> {
     }
   }
 
-  // 添加代理相关headers
-  proxyHeaders['User-Agent'] = proxyHeaders['User-Agent'] || 'CIAO-CORS/1.0';
-  
+  // 优先保留用户的User-Agent，只在没有时才设置默认值
+  // 使用更真实的默认User-Agent，模拟常见浏览器
+  if (!proxyHeaders['User-Agent'] && !proxyHeaders['user-agent']) {
+    // 使用多个真实的User-Agent轮换，减少被识别为爬虫的风险
+    const defaultUserAgents = [
+      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+      'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+      'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:121.0) Gecko/20100101 Firefox/121.0',
+      'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.2 Safari/605.1.15',
+      'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+    ];
+
+    // 基于时间戳选择User-Agent，确保一定的随机性但又相对稳定
+    const index = Math.floor(Date.now() / (1000 * 60 * 10)) % defaultUserAgents.length;
+    proxyHeaders['User-Agent'] = defaultUserAgents[index];
+  }
+
+  // 增强其他重要请求头的处理，提高请求成功率
+  // 如果没有Accept头，添加通用的Accept头
+  if (!proxyHeaders['Accept'] && !proxyHeaders['accept']) {
+    proxyHeaders['Accept'] = 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7';
+  }
+
+  // 如果没有Accept-Language头，添加常见的语言设置
+  if (!proxyHeaders['Accept-Language'] && !proxyHeaders['accept-language']) {
+    proxyHeaders['Accept-Language'] = 'en-US,en;q=0.9,zh-CN;q=0.8,zh;q=0.7';
+  }
+
+  // 如果没有Accept-Encoding头，添加常见的编码支持
+  if (!proxyHeaders['Accept-Encoding'] && !proxyHeaders['accept-encoding']) {
+    proxyHeaders['Accept-Encoding'] = 'gzip, deflate, br';
+  }
+
+  // 添加DNT头，表明不希望被跟踪（提高隐私性）
+  if (!proxyHeaders['DNT'] && !proxyHeaders['dnt']) {
+    proxyHeaders['DNT'] = '1';
+  }
+
+  // 添加Sec-Fetch-* 头，模拟真实浏览器行为
+  if (!proxyHeaders['Sec-Fetch-Dest'] && !proxyHeaders['sec-fetch-dest']) {
+    proxyHeaders['Sec-Fetch-Dest'] = 'document';
+  }
+  if (!proxyHeaders['Sec-Fetch-Mode'] && !proxyHeaders['sec-fetch-mode']) {
+    proxyHeaders['Sec-Fetch-Mode'] = 'navigate';
+  }
+  if (!proxyHeaders['Sec-Fetch-Site'] && !proxyHeaders['sec-fetch-site']) {
+    proxyHeaders['Sec-Fetch-Site'] = 'none';
+  }
+
   return proxyHeaders;
 }
 
@@ -467,36 +513,87 @@ async function processRequestBody(request: Request, config: Config): Promise<any
 }
 
 /**
- * 执行代理请求
+ * 执行代理请求（带智能重试机制）
  */
 async function performProxy(request: Request, targetUrl: string, config: Config): Promise<Response> {
   const headers = buildProxyHeaders(request.headers);
   const body = await processRequestBody(request, config);
 
-  const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), config.timeout);
+  // 重试配置
+  const maxRetries = 3;
+  const retryDelay = [100, 300, 1000]; // 递增延迟：100ms, 300ms, 1000ms
 
-  try {
-    const response = await fetch(targetUrl, {
-      method: request.method,
-      headers,
-      body,
-      signal: controller.signal,
-      redirect: 'follow',
-      // 增加缓存控制
-      cache: request.headers.get('cache-control')?.includes('no-cache') ? 'no-cache' : 'default'
-    });
+  // 判断是否应该重试的错误类型
+  const shouldRetry = (error: any, attempt: number): boolean => {
+    if (attempt >= maxRetries) return false;
 
-    clearTimeout(timeoutId);
-    return response;
-  } catch (error) {
-    clearTimeout(timeoutId);
-    
-    if (error instanceof Error && error.name === 'AbortError') {
-      throw new Error('Request timeout');
+    // 网络错误、连接被拒绝、DNS错误等应该重试
+    if (error instanceof Error) {
+      const message = error.message.toLowerCase();
+      return message.includes('network') ||
+             message.includes('connection') ||
+             message.includes('econnrefused') ||
+             message.includes('enotfound') ||
+             message.includes('timeout') ||
+             message.includes('fetch');
     }
-    throw error;
+    return false;
+  };
+
+  // 判断HTTP状态码是否应该重试
+  const shouldRetryStatus = (status: number): boolean => {
+    // 5xx服务器错误、429限流、502/503/504网关错误应该重试
+    return status >= 500 || status === 429 || status === 502 || status === 503 || status === 504;
+  };
+
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), config.timeout);
+
+    try {
+      const response = await fetch(targetUrl, {
+        method: request.method,
+        headers,
+        body: attempt === 0 ? body : (body instanceof ArrayBuffer ? body : undefined), // 重试时只对ArrayBuffer重用body
+        signal: controller.signal,
+        redirect: 'follow',
+        // 增加缓存控制
+        cache: request.headers.get('cache-control')?.includes('no-cache') ? 'no-cache' : 'default'
+      });
+
+      clearTimeout(timeoutId);
+
+      // 检查是否需要基于状态码重试
+      if (attempt < maxRetries && shouldRetryStatus(response.status)) {
+        console.warn(`Attempt ${attempt + 1} failed with status ${response.status}, retrying...`);
+        await new Promise(resolve => setTimeout(resolve, retryDelay[attempt]));
+        continue;
+      }
+
+      return response;
+    } catch (error) {
+      clearTimeout(timeoutId);
+
+      if (error instanceof Error && error.name === 'AbortError') {
+        if (attempt < maxRetries) {
+          console.warn(`Attempt ${attempt + 1} timed out, retrying...`);
+          await new Promise(resolve => setTimeout(resolve, retryDelay[attempt]));
+          continue;
+        }
+        throw new Error('Request timeout after retries');
+      }
+
+      if (shouldRetry(error, attempt)) {
+        console.warn(`Attempt ${attempt + 1} failed: ${error instanceof Error ? error.message : 'Unknown error'}, retrying...`);
+        await new Promise(resolve => setTimeout(resolve, retryDelay[attempt]));
+        continue;
+      }
+
+      throw error;
+    }
   }
+
+  throw new Error('Max retries exceeded');
 }
 
 // ==================== 统计和日志模块 ====================
@@ -856,7 +953,7 @@ class CiaoCorsServer {
         return new Response(JSON.stringify({
           status: 'ok',
           timestamp: new Date().toISOString(),
-          version: '1.2.5'
+          version: '1.3.0'
         }), {
           headers: { 'Content-Type': 'application/json' }
         });
@@ -1072,7 +1169,7 @@ class CiaoCorsServer {
             size: this.responseCache.size
           },
           uptime: Date.now() - stats.startTime,
-          version: '1.2.5'
+          version: '1.3.0'
         }, null, 2), {
           headers: { 'Content-Type': 'application/json' }
         });
@@ -1081,7 +1178,7 @@ class CiaoCorsServer {
         return new Response(JSON.stringify({
           status: 'healthy',
           timestamp: new Date().toISOString(),
-          version: '1.2.5',
+          version: '1.3.0',
           memory: Deno.memoryUsage ? {
             rss: Deno.memoryUsage().rss,
             heapTotal: Deno.memoryUsage().heapTotal,
@@ -1192,7 +1289,7 @@ class CiaoCorsServer {
 
       case 'version':
         return new Response(JSON.stringify({
-          version: '1.2.5',
+          version: '1.3.0',
           runtime: `Deno ${Deno.version.deno}`,
           typescript: Deno.version.typescript,
           v8: Deno.version.v8
@@ -1363,7 +1460,7 @@ async function main() {
 
   console.log(`
 ====================================================
-  🚀 CIAO-CORS Server v1.2.5
+  🚀 CIAO-CORS Server v1.3.0
 ====================================================
   📌 Port: ${config.port}
   📊 Stats: ${config.enableStats ? 'enabled' : 'disabled'}
