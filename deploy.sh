@@ -150,22 +150,36 @@ check_root() {
 check_network() {
     print_status "info" "检查网络连接..."
 
-    local test_urls=("github.com" "deno.land" "raw.githubusercontent.com")
+    # 首先尝试 curl 方式检查（更可靠）
+    local test_urls=("https://raw.githubusercontent.com" "https://github.com" "https://deno.land")
     local network_ok=false
 
     for url in "${test_urls[@]}"; do
-        if ping -c 1 -W 5 "$url" &>/dev/null; then
+        if timeout 15 curl -s --connect-timeout 10 --max-time 10 --head "$url" &>/dev/null; then
             network_ok=true
+            print_status "success" "网络连接正常 (通过 $url)"
             break
         fi
     done
 
+    # 如果 curl 失败，尝试 ping
+    if [[ "$network_ok" == "false" ]]; then
+        local ping_urls=("8.8.8.8" "1.1.1.1" "github.com")
+        for url in "${ping_urls[@]}"; do
+            if ping -c 1 -W 5 "$url" &>/dev/null 2>&1; then
+                network_ok=true
+                print_status "success" "网络连接正常 (通过 ping $url)"
+                break
+            fi
+        done
+    fi
+
     if [[ "$network_ok" != "true" ]]; then
         print_status "error" "网络连接失败，请检查网络设置"
+        print_status "info" "请确保可以访问 GitHub 和相关服务"
         return $EXIT_NETWORK_ERROR
     fi
 
-    print_status "success" "网络连接正常"
     return $EXIT_SUCCESS
 }
 
@@ -2517,6 +2531,39 @@ test_stats_function() {
     fi
 }
 
+# 获取当前版本
+get_current_service_version() {
+    if [[ -f "$INSTALL_DIR/server.ts" ]]; then
+        # 尝试从健康检查端点获取版本
+        local port=$(grep "^PORT=" "$CONFIG_FILE" 2>/dev/null | cut -d'=' -f2 || echo "$DEFAULT_PORT")
+        local current_version=""
+
+        # 如果服务正在运行，尝试从API获取版本
+        if systemctl is-active --quiet "$SERVICE_NAME" 2>/dev/null; then
+            current_version=$(curl -s --connect-timeout 5 "http://localhost:$port/version" 2>/dev/null | grep -o '"version":"[^"]*"' | cut -d'"' -f4 2>/dev/null)
+        fi
+
+        # 如果API获取失败，从文件中提取
+        if [[ -z "$current_version" ]]; then
+            current_version=$(grep -o "version: '[0-9]\+\.[0-9]\+\.[0-9]\+'" "$INSTALL_DIR/server.ts" | head -1 | sed "s/version: '//;s/'//")
+            if [[ -z "$current_version" ]]; then
+                current_version=$(grep -o '[0-9]\+\.[0-9]\+\.[0-9]\+' "$INSTALL_DIR/server.ts" | head -1)
+            fi
+        fi
+
+        echo "$current_version"
+    fi
+}
+
+# 获取远程版本
+get_remote_service_version() {
+    local remote_version=""
+    if remote_version=$(timeout 30 curl -s --connect-timeout 10 --max-time 25 --retry 2 \
+        "$GITHUB_REPO/server.ts" 2>/dev/null | grep -o "version: '[0-9]\+\.[0-9]\+\.[0-9]\+'" | head -1 | sed "s/version: '//;s/'//" 2>/dev/null); then
+        echo "$remote_version"
+    fi
+}
+
 # 更新服务
 update_service() {
   print_status "info" "开始更新服务..."
@@ -2526,6 +2573,22 @@ update_service() {
       print_status "error" "网络连接失败，无法更新"
       return $EXIT_NETWORK_ERROR
   }
+
+  # 获取当前版本和远程版本
+  local current_version=$(get_current_service_version)
+  local remote_version=$(get_remote_service_version)
+
+  if [[ -n "$current_version" ]] && [[ -n "$remote_version" ]]; then
+      print_status "info" "当前版本: $current_version"
+      print_status "info" "远程版本: $remote_version"
+
+      if [[ "$current_version" == "$remote_version" ]]; then
+          print_status "success" "服务已是最新版本"
+          return $EXIT_SUCCESS
+      fi
+  else
+      print_status "warning" "无法获取版本信息，继续更新..."
+  fi
 
   # 创建备份目录
   mkdir -p "$BACKUP_DIR"
@@ -2737,8 +2800,9 @@ check_script_update() {
     print_status "info" "检查脚本更新..."
 
     local remote_version=""
-    # 增加更严格的超时和错误处理
-    if remote_version=$(timeout 30 curl -s --connect-timeout 10 --max-time 25 --retry 2 --retry-delay 3 \
+    # 增加更宽松的超时设置和更好的错误处理
+    if remote_version=$(timeout 60 curl -s --connect-timeout 15 --max-time 45 --retry 3 --retry-delay 5 \
+        --user-agent "CIAO-CORS-Deploy/$SCRIPT_VERSION" \
         "$GITHUB_REPO/deploy.sh" 2>/dev/null | grep "^SCRIPT_VERSION=" | head -1 | cut -d'"' -f2 2>/dev/null); then
 
         # 验证版本号格式
@@ -2756,19 +2820,26 @@ check_script_update() {
                         return $EXIT_GENERAL_ERROR
                     fi
 
-                    # 下载新脚本到临时文件
-                    if timeout 60 curl -fsSL --connect-timeout 15 --max-time 45 --retry 2 \
+                    # 下载新脚本到临时文件，增加更宽松的超时
+                    if timeout 120 curl -fsSL --connect-timeout 20 --max-time 90 --retry 3 --retry-delay 5 \
+                       --user-agent "CIAO-CORS-Deploy/$SCRIPT_VERSION" \
                        "$GITHUB_REPO/deploy.sh" -o "$0.new" 2>/dev/null; then
 
                         # 验证下载的脚本
                         if [[ -s "$0.new" ]] && head -1 "$0.new" | grep -q "^#!/bin/bash"; then
-                            chmod +x "$0.new"
-                            if mv "$0.new" "$0" 2>/dev/null; then
-                                print_status "success" "脚本更新成功，请重新运行脚本"
-                                print_status "info" "旧版本已备份到: $script_backup"
-                                exit $EXIT_SUCCESS
+                            # 额外验证：检查脚本是否包含关键函数
+                            if grep -q "main()" "$0.new" && grep -q "SCRIPT_VERSION=" "$0.new"; then
+                                chmod +x "$0.new"
+                                if mv "$0.new" "$0" 2>/dev/null; then
+                                    print_status "success" "脚本更新成功，请重新运行脚本"
+                                    print_status "info" "旧版本已备份到: $script_backup"
+                                    exit $EXIT_SUCCESS
+                                else
+                                    print_status "error" "无法替换脚本文件"
+                                    rm -f "$0.new"
+                                fi
                             else
-                                print_status "error" "无法替换脚本文件"
+                                print_status "error" "下载的脚本文件不完整"
                                 rm -f "$0.new"
                             fi
                         else
@@ -2776,7 +2847,7 @@ check_script_update() {
                             rm -f "$0.new"
                         fi
                     else
-                        print_status "error" "脚本更新失败"
+                        print_status "error" "脚本更新失败，请检查网络连接"
                         rm -f "$0.new"
                     fi
                 fi
@@ -2787,7 +2858,8 @@ check_script_update() {
             print_status "warning" "远程版本号格式无效: $remote_version"
         fi
     else
-        print_status "warning" "无法检查脚本更新，请检查网络连接"
+        print_status "warning" "无法检查脚本更新，请检查网络连接或稍后重试"
+        print_status "info" "你也可以手动从 https://github.com/bestZwei/ciao-cors 下载最新版本"
     fi
 }
 

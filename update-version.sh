@@ -23,10 +23,26 @@ print_status() {
 
 # 获取当前版本
 get_current_version() {
-    local version=$(grep -o 'v[0-9]\+\.[0-9]\+\.[0-9]\+' server.ts | head -1 | sed 's/v//')
+    local version=""
+
+    # 首先尝试从 version: '1.3.0' 格式中提取
+    version=$(grep -o "version: '[0-9]\+\.[0-9]\+\.[0-9]\+'" server.ts | head -1 | sed "s/version: '//;s/'//")
+
+    # 如果没找到，尝试从 "version": "1.3.0" 格式中提取
+    if [[ -z "$version" ]]; then
+        version=$(grep -o '"version": "[0-9]\+\.[0-9]\+\.[0-9]\+"' server.ts | head -1 | sed 's/"version": "//;s/"//')
+    fi
+
+    # 如果还没找到，尝试从 v1.3.0 格式中提取
+    if [[ -z "$version" ]]; then
+        version=$(grep -o 'v[0-9]\+\.[0-9]\+\.[0-9]\+' server.ts | head -1 | sed 's/v//')
+    fi
+
+    # 最后尝试任何版本号格式
     if [[ -z "$version" ]]; then
         version=$(grep -o '[0-9]\+\.[0-9]\+\.[0-9]\+' server.ts | head -1)
     fi
+
     echo "$version"
 }
 
@@ -44,18 +60,32 @@ update_file_version() {
     local file=$1
     local old_version=$2
     local new_version=$3
-    
+
     if [[ ! -f "$file" ]]; then
         print_status "warning" "文件不存在: $file"
         return 1
     fi
-    
+
     # 创建备份
     cp "$file" "${file}.backup"
-    
-    # 更新版本号
-    sed -i "s/${old_version}/${new_version}/g" "$file"
-    
+
+    # 根据文件类型使用不同的更新策略
+    case "$file" in
+        "server.ts")
+            # 更新 TypeScript 文件中的版本号
+            sed -i "s/version: '[0-9]\+\.[0-9]\+\.[0-9]\+'/version: '$new_version'/g" "$file"
+            sed -i "s/\"version\": \"[0-9]\+\.[0-9]\+\.[0-9]\+\"/\"version\": \"$new_version\"/g" "$file"
+            ;;
+        "package.json"|"deno.json")
+            # 更新 JSON 文件中的版本号
+            sed -i "s/\"version\": \"[0-9]\+\.[0-9]\+\.[0-9]\+\"/\"version\": \"$new_version\"/g" "$file"
+            ;;
+        *)
+            # 通用版本号更新
+            sed -i "s/${old_version}/${new_version}/g" "$file"
+            ;;
+    esac
+
     # 检查是否有更改
     if diff -q "$file" "${file}.backup" > /dev/null; then
         print_status "info" "文件无需更新: $file"
